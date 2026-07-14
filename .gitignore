@@ -1,0 +1,19 @@
+# secrets — never commit
+.env
+.env.*
+!.env.example
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+
+# node
+node_modules/
+.next/
+out/
+next-env.d.ts
+
+# misc
+.DS_Store
+*.log
