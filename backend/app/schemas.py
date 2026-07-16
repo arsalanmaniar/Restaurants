@@ -410,3 +410,28 @@ class RestaurantPatch(BaseModel):
     min_order_amount: Decimal | None = Field(default=None, ge=0)
     is_accepting_orders: bool | None = None
     subscription_plan_id: int | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Restaurant onboarding (admin creates restaurant + owner account in one go)
+# --------------------------------------------------------------------------- #
+
+
+class RestaurantCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    phone: str = Field(min_length=1, max_length=32)
+    address: str = Field(min_length=1)
+    email: EmailStr
+    password: str = Field(min_length=8)
+
+
+class OwnerCreated(BaseModel):
+    """The admin supplied and already knows the password — it is deliberately not
+    echoed back here, so it never has a second place to leak from (e.g. logs)."""
+
+    email: str
+
+
+class RestaurantCreateOut(BaseModel):
+    restaurant: RestaurantOut
+    owner: OwnerCreated

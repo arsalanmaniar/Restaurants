@@ -2,7 +2,10 @@
 
 from decimal import Decimal
 
-from app.models import Restaurant, RestaurantStatus
+from sqlalchemy import select
+
+from app.core.security import verify_password
+from app.models import Restaurant, RestaurantStaff, RestaurantStatus
 from app.services import tools
 
 
@@ -64,6 +67,141 @@ class TestRestaurantApproval:
 
         stats = client.get("/admin/stats", headers=admin_headers).json()
         assert stats["pending_approval"] >= 1
+
+
+def _onboarding_payload(**overrides):
+    payload = {
+        "name": "Onboarding Test Kitchen",
+        "phone": "923001112222",
+        "address": "12 Test Street, Karachi",
+        "email": "owner@onboardingtest.pk",
+        "password": "correct-horse-battery",
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestRestaurantOnboarding:
+    def test_creates_restaurant_and_owner_with_admin_supplied_credentials(
+        self, db, client, admin_headers
+    ):
+        response = client.post(
+            "/admin/restaurants", headers=admin_headers, json=_onboarding_payload()
+        )
+        assert response.status_code == 201, response.text
+        body = response.json()
+
+        assert body["restaurant"]["name"] == "Onboarding Test Kitchen"
+        assert body["restaurant"]["status"] == "active"
+        assert body["restaurant"]["is_accepting_orders"] is True
+
+        restaurant_id = body["restaurant"]["id"]
+        assert body["owner"] == {"email": "owner@onboardingtest.pk"}
+        assert "temp_password" not in body["owner"]
+        assert "username" not in body["owner"]
+
+        staff = db.scalar(
+            select(RestaurantStaff).where(RestaurantStaff.restaurant_id == restaurant_id)
+        )
+        assert staff is not None
+        assert staff.role.value == "owner"
+        assert staff.email == "owner@onboardingtest.pk"
+        assert verify_password("correct-horse-battery", staff.password_hash)
+
+    def test_admin_supplied_password_works_at_login(self, client, admin_headers):
+        created = client.post(
+            "/admin/restaurants", headers=admin_headers, json=_onboarding_payload()
+        ).json()
+        restaurant_id = created["restaurant"]["id"]
+
+        login = client.post(
+            "/auth/restaurant/login",
+            json={"email": "owner@onboardingtest.pk", "password": "correct-horse-battery"},
+        )
+        assert login.status_code == 200, login.text
+        assert login.json()["restaurant_id"] == restaurant_id
+
+    def test_duplicate_name_rejected(self, client, admin_headers, pizza):
+        response = client.post(
+            "/admin/restaurants",
+            headers=admin_headers,
+            json=_onboarding_payload(name=pizza.name),
+        )
+        assert response.status_code == 409
+
+    def test_duplicate_email_returns_409(self, client, admin_headers):
+        first = client.post(
+            "/admin/restaurants", headers=admin_headers, json=_onboarding_payload()
+        )
+        assert first.status_code == 201, first.text
+
+        second = client.post(
+            "/admin/restaurants",
+            headers=admin_headers,
+            json=_onboarding_payload(name="A Different Restaurant"),
+        )
+        assert second.status_code == 409
+        assert "email" in second.json()["detail"].lower()
+
+    def test_short_password_returns_422(self, client, admin_headers):
+        response = client.post(
+            "/admin/restaurants",
+            headers=admin_headers,
+            json=_onboarding_payload(password="1234567"),
+        )
+        assert response.status_code == 422
+
+    def test_malformed_email_returns_422(self, client, admin_headers):
+        response = client.post(
+            "/admin/restaurants",
+            headers=admin_headers,
+            json=_onboarding_payload(email="notanemail"),
+        )
+        assert response.status_code == 422
+
+    def test_staff_cannot_create_restaurants(self, client, pizza_headers):
+        response = client.post(
+            "/admin/restaurants",
+            headers=pizza_headers,
+            json=_onboarding_payload(name="Sneaky Kitchen", email="sneaky@example.com"),
+        )
+        assert response.status_code == 403
+
+    def test_deletes_restaurant_and_its_staff(self, db, client, admin_headers):
+        created = client.post(
+            "/admin/restaurants",
+            headers=admin_headers,
+            json=_onboarding_payload(
+                name="Deletable Kitchen", email="owner@deletable.pk"
+            ),
+        ).json()
+        restaurant_id = created["restaurant"]["id"]
+
+        response = client.delete(
+            f"/admin/restaurants/{restaurant_id}", headers=admin_headers
+        )
+        assert response.status_code == 204
+
+        assert db.get(Restaurant, restaurant_id) is None
+        assert (
+            db.scalar(
+                select(RestaurantStaff).where(RestaurantStaff.restaurant_id == restaurant_id)
+            )
+            is None
+        )
+
+    def test_cannot_delete_restaurant_with_orders(self, client, admin_headers, pizza, cod_order):
+        response = client.delete(f"/admin/restaurants/{pizza.id}", headers=admin_headers)
+        assert response.status_code == 409
+        assert "order" in response.json()["detail"].lower()
+
+    def test_deleting_unknown_restaurant_is_404(self, client, admin_headers):
+        response = client.delete("/admin/restaurants/999999", headers=admin_headers)
+        assert response.status_code == 404
+
+    def test_staff_cannot_delete_restaurants(self, client, pizza_headers, biryani):
+        response = client.delete(f"/admin/restaurants/{biryani.id}", headers=pizza_headers)
+        assert response.status_code == 403
 
 
 class TestCommission:

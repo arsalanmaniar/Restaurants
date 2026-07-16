@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { AddRestaurantModal, type RestaurantCreated } from "@/components/add-restaurant-modal";
+import { DeleteRestaurantDialog } from "@/components/delete-restaurant-dialog";
+import { RestaurantCreatedDialog } from "@/components/restaurant-created-dialog";
 import {
   Button,
   Card,
@@ -29,6 +32,9 @@ export default function AdminRestaurantsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [created, setCreated] = useState<RestaurantCreated | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<RestaurantSummary | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -129,6 +135,21 @@ export default function AdminRestaurantsPage() {
     }
   }
 
+  function handleCreated(result: RestaurantCreated) {
+    setAddOpen(false);
+    setCreated(result);
+  }
+
+  function handleCreatedDialogClosed() {
+    setCreated(null);
+    load();
+  }
+
+  function handleDeleted(id: number) {
+    setRestaurants((prev) => prev.filter((r) => r.id !== id));
+    setDeleteTarget(null);
+  }
+
   const pending = restaurants.filter((r) => r.status === "pending");
   const rest = restaurants.filter((r) => r.status !== "pending");
 
@@ -136,19 +157,34 @@ export default function AdminRestaurantsPage() {
 
   return (
     <div className="space-y-6">
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="font-display text-xl font-semibold text-cast-iron">Restaurants</h1>
+        <Button variant="admin" onClick={() => setAddOpen(true)}>
+          Add Restaurant
+        </Button>
+      </div>
+
       {error && <ErrorNote>{error}</ErrorNote>}
 
       {pending.length > 0 && (
         <section>
-          <h1 className="mb-3 font-display text-lg font-semibold text-cast-iron">
+          <h2 className="mb-3 font-display text-lg font-semibold text-cast-iron">
             Awaiting approval ({pending.length})
-          </h1>
+          </h2>
           <div className="space-y-3">
             {pending.map((r) => (
               // Reuses the order-status "needs action" gold — an unreviewed signup
               // is the restaurant-list equivalent of a pending order.
               <Card key={r.id} accent={STATUS_ACCENT.pending}>
-                <div className="flex flex-wrap items-center justify-between gap-4">
+                <button
+                  type="button"
+                  onClick={() => setDeleteTarget(r)}
+                  aria-label={`Delete ${r.name}`}
+                  className="absolute right-3 top-3 text-xs font-medium text-cast-iron/40 hover:text-smoked-brick"
+                >
+                  Delete
+                </button>
+                <div className="flex flex-wrap items-center justify-between gap-4 pr-14">
                   <div>
                     <p className="font-semibold text-cast-iron">{r.name}</p>
                     <p className="text-sm text-cast-iron/70">
@@ -190,7 +226,15 @@ export default function AdminRestaurantsPage() {
           <div className="space-y-3">
             {rest.map((r) => (
               <Card key={r.id} accent={ROLE_ACCENT.admin}>
-                <div className="flex flex-wrap items-start justify-between gap-4">
+                <button
+                  type="button"
+                  onClick={() => setDeleteTarget(r)}
+                  aria-label={`Delete ${r.name}`}
+                  className="absolute right-3 top-3 text-xs font-medium text-cast-iron/40 hover:text-smoked-brick"
+                >
+                  Delete
+                </button>
+                <div className="flex flex-wrap items-start justify-between gap-4 pr-14">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-semibold text-cast-iron">{r.name}</span>
@@ -264,6 +308,22 @@ export default function AdminRestaurantsPage() {
           </div>
         )}
       </section>
+
+      {addOpen && (
+        <AddRestaurantModal onClose={() => setAddOpen(false)} onCreated={handleCreated} />
+      )}
+
+      {created && (
+        <RestaurantCreatedDialog created={created} onClose={handleCreatedDialogClosed} />
+      )}
+
+      {deleteTarget && (
+        <DeleteRestaurantDialog
+          restaurant={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onDeleted={handleDeleted}
+        />
+      )}
     </div>
   );
 }

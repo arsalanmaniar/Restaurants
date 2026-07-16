@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentAdmin, DbSession
+from app.core.security import hash_password
 from app.models import (
     Coupon,
     CouponRedemption,
@@ -18,7 +19,9 @@ from app.models import (
     Refund,
     RefundStatus,
     Restaurant,
+    RestaurantStaff,
     RestaurantStatus,
+    StaffRole,
     SubscriptionPlan,
 )
 from app.schemas import (
@@ -28,8 +31,11 @@ from app.schemas import (
     CouponSummaryOut,
     OrderRefundState,
     OrderWithRestaurantOut,
+    OwnerCreated,
     RefundIn,
     RefundOut,
+    RestaurantCreate,
+    RestaurantCreateOut,
     RestaurantOut,
     RestaurantPatch,
     RestaurantSummaryOut,
@@ -84,6 +90,84 @@ def list_restaurants(admin: CurrentAdmin, db: DbSession) -> list[RestaurantSumma
         )
         for restaurant, count, revenue, commission in rows
     ]
+
+
+@router.post(
+    "/restaurants", response_model=RestaurantCreateOut, status_code=status.HTTP_201_CREATED
+)
+def create_restaurant(
+    payload: RestaurantCreate, admin: CurrentAdmin, db: DbSession
+) -> RestaurantCreateOut:
+    """Onboard a restaurant: create the restaurant row plus its first staff account
+    (the owner), so the admin can hand over a working login in one step instead of the
+    restaurant waiting on a separate signup flow.
+
+    The admin supplies the owner's email + password directly — nothing is generated,
+    and the password is never echoed back or logged; only its bcrypt hash lives in
+    the database.
+    """
+    if db.scalar(select(Restaurant).where(Restaurant.name == payload.name)):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "A restaurant with that name already exists"
+        )
+
+    if db.scalar(select(RestaurantStaff).where(RestaurantStaff.email == payload.email)):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "An account with that email already exists"
+        )
+
+    restaurant = Restaurant(
+        name=payload.name,
+        phone=payload.phone,
+        address=payload.address,
+        cuisine_type="Other",
+        status=RestaurantStatus.ACTIVE,
+        commission_rate=Decimal("15.00"),
+        delivery_fee=Decimal("100.00"),
+        min_order_amount=Decimal("500.00"),
+        is_accepting_orders=True,
+    )
+    db.add(restaurant)
+    db.flush()  # populate restaurant.id for the owner account below
+
+    owner = RestaurantStaff(
+        restaurant_id=restaurant.id,
+        name=f"{restaurant.name} Owner",
+        email=payload.email,
+        password_hash=hash_password(payload.password),
+        role=StaffRole.OWNER,
+        is_active=True,
+    )
+    db.add(owner)
+    db.commit()
+    db.refresh(restaurant)
+
+    return RestaurantCreateOut(
+        restaurant=RestaurantOut.model_validate(restaurant),
+        owner=OwnerCreated(email=owner.email),
+    )
+
+
+@router.delete("/restaurants/{restaurant_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_restaurant(restaurant_id: int, admin: CurrentAdmin, db: DbSession) -> None:
+    restaurant = db.get(Restaurant, restaurant_id)
+    if restaurant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Restaurant not found")
+
+    order_count = db.scalar(
+        select(func.count(Order.id)).where(Order.restaurant_id == restaurant_id)
+    )
+    if order_count:
+        # Orders.restaurant_id is ON DELETE RESTRICT for exactly this reason — real
+        # customer order history must never be silently orphaned by a delete here.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Cannot delete: {order_count} order(s) reference this restaurant. "
+            "Deactivate instead.",
+        )
+
+    db.delete(restaurant)  # cascades to staff/categories/menu_items/working_hours
+    db.commit()
 
 
 @router.patch("/restaurants/{restaurant_id}", response_model=RestaurantOut)

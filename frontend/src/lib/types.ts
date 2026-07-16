@@ -88,6 +88,15 @@ export interface RestaurantSummary extends Restaurant {
   total_commission: string;
 }
 
+export interface OwnerCreated {
+  email: string;
+}
+
+export interface RestaurantCreateResponse {
+  restaurant: Restaurant;
+  owner: OwnerCreated;
+}
+
 export interface RestaurantStats {
   orders_24h: number;
   revenue_24h: string;
