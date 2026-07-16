@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models import Conversation, MessageDirection, Order
 from app.services import conversations as convo
+from app.services import prefilter
 from app.services.payments.registry import available_methods
 from app.services.tool_schemas import TOOL_SCHEMAS
 from app.services.tools import TOOL_IMPLS
@@ -489,9 +490,46 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
     return _safe_text(_force_text_reply(client, messages)), trace
 
 
-def handle_incoming_message(db: Session, conversation: Conversation, _body: str) -> None:
+def _send_and_log(db: Session, conversation: Conversation, reply: str) -> None:
+    """Send a canned reply (prefilter redirect, rate-limit notice, ...) and log it
+    the same way the main Groq path does, so the dashboard's conversation view still
+    shows a complete transcript."""
+    try:
+        send_text(conversation.customer.whatsapp_number, reply)
+    except WhatsAppError:
+        logger.exception("could not deliver reply for conversation %s", conversation.id)
+    convo.log_message(db, conversation, MessageDirection.OUTBOUND, reply, meta=None)
+    db.commit()
+
+
+def handle_incoming_message(db: Session, conversation: Conversation, body: str) -> None:
     """Entry point from the webhook. The inbound message is already logged, so it
     is part of the history `generate_reply` reads."""
+    # Cheap pre-filters BEFORE any Groq call. The Groq free tier caps at ~40
+    # conversation turns per day; a single MLM broadcast or a spam burst can
+    # exhaust the quota and stop a real customer from ordering. See prefilter
+    # module docstring for the incidents that motivated each check.
+    if prefilter.is_rate_limited(db, conversation):
+        if prefilter.already_notified_rate_limit(db, conversation):
+            # Customer heard "please slow down" a moment ago. Log the inbound
+            # is-being-ignored so support can see it, but do not spam them back.
+            logger.info(
+                "conversation %s: rate-limited, notice already sent — dropping silently",
+                conversation.id,
+            )
+            return
+        _send_and_log(db, conversation, prefilter.RATE_LIMITED_REPLY)
+        return
+
+    if prefilter.is_offtopic(body):
+        logger.info(
+            "conversation %s: off-topic message pre-filtered (%r)",
+            conversation.id,
+            body[:60],
+        )
+        _send_and_log(db, conversation, prefilter.OFFTOPIC_REDIRECT)
+        return
+
     try:
         reply, trace = generate_reply(db, conversation)
         db.commit()
