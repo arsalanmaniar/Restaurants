@@ -18,7 +18,13 @@ app = FastAPI(title=settings.app_name, version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    # effective_cors_origins merges the static dev list with CORS_ALLOWED_ORIGINS (Vercel
+    # URL(s) set as an HF Spaces secret). In production this is the only allowlist —
+    # the dev regex below is gated on debug=True so it never runs in HF Spaces.
+    allow_origins=settings.effective_cors_origins,
+    # Dev only: any localhost/127.0.0.1 port. In production this is None and only the
+    # explicit allowlist applies, so we never open the API to arbitrary origins.
+    allow_origin_regex=settings.cors_dev_origin_regex if settings.debug else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

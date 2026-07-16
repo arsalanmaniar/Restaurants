@@ -1,0 +1,21 @@
+# Secrets — never bake into image
+.env
+.env.*
+
+# Python artifacts
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Tests (not needed at runtime)
+tests/
+
+# Editor / OS
+.DS_Store
+*.log
+.idea/
+.vscode/
