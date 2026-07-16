@@ -2,22 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+/* AbhiAya runs a single, deliberately-designed light palette (see design
+   sign-off) — it does not adapt to OS dark-mode, so no prefers-color-scheme
+   override here. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --background: #ebe4db; /* roasted-almond */
+  --foreground: #2b2420; /* cast-iron */
 }
 
 body {
   color: var(--foreground);
   background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
 }
 
 @layer utilities {

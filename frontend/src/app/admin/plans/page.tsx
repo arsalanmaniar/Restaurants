@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { Button, Card, EmptyState, ErrorNote, Input, money } from "@/components/ui";
+import { Button, Card, EmptyState, ErrorNote, Input, ROLE_ACCENT, money } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { SubscriptionPlan } from "@/lib/types";
 
@@ -103,8 +103,8 @@ export default function PlansPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-lg font-semibold text-slate-900">Subscription plans</h1>
-        <p className="mt-1 text-sm text-slate-500">
+        <h1 className="font-display text-lg font-semibold text-cast-iron">Subscription plans</h1>
+        <p className="mt-1 text-sm text-cast-iron/60">
           A plan is a monthly fee plus the commission rate it implies. Assign one to a
           restaurant from the Restaurants page.
         </p>
@@ -112,8 +112,8 @@ export default function PlansPage() {
 
       {error && <ErrorNote>{error}</ErrorNote>}
 
-      <Card>
-        <h2 className="mb-4 text-sm font-semibold text-slate-900">Add a plan</h2>
+      <Card accent={ROLE_ACCENT.admin}>
+        <h2 className="mb-4 text-sm font-semibold text-cast-iron">Add a plan</h2>
         <form onSubmit={createPlan} className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-3">
             <Input
@@ -151,7 +151,7 @@ export default function PlansPage() {
             value={draft.features}
             onChange={(e) => setDraft({ ...draft, features: e.target.value })}
           />
-          <Button type="submit" disabled={creating}>
+          <Button type="submit" variant="admin" disabled={creating}>
             {creating ? "Adding…" : "Add plan"}
           </Button>
         </form>
@@ -164,47 +164,53 @@ export default function PlansPage() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {plans.map((plan) => (
-            <Card key={plan.id} className={plan.is_active ? "" : "bg-slate-50 opacity-70"}>
+            <Card
+              key={plan.id}
+              accent={ROLE_ACCENT.admin}
+              className={plan.is_active ? "p-5" : "p-5 opacity-60"}
+            >
               <div className="flex items-start justify-between">
                 <div>
-                  <p className="font-semibold text-slate-900">{plan.name}</p>
-                  <p className="mt-1 text-2xl font-semibold tabular-nums text-slate-900">
+                  <p className="font-semibold text-cast-iron">{plan.name}</p>
+                  <p className="mt-1 text-2xl font-semibold tabular-nums text-cast-iron">
                     {Number(plan.monthly_fee) === 0 ? "Free" : money(plan.monthly_fee)}
                     {Number(plan.monthly_fee) > 0 && (
-                      <span className="text-sm font-normal text-slate-500">/mo</span>
+                      <span className="text-sm font-normal text-cast-iron/50">/mo</span>
                     )}
                   </p>
                 </div>
                 {!plan.is_active && (
-                  <span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-600">
+                  <span className="rounded-full bg-cast-iron/10 px-2 py-0.5 text-xs font-semibold text-cast-iron/60">
                     Inactive
                   </span>
                 )}
               </div>
 
               {plan.commission_rate && (
-                <p className="mt-2 text-sm text-slate-600">
+                <p className="mt-2 text-sm text-cast-iron/70">
                   Commission{" "}
-                  <span className="font-semibold text-slate-900">{plan.commission_rate}%</span>
+                  <span className="font-semibold tabular-nums text-cast-iron">
+                    {plan.commission_rate}%
+                  </span>
                 </p>
               )}
 
               {plan.description && (
-                <p className="mt-2 text-sm text-slate-500">{plan.description}</p>
+                <p className="mt-2 text-sm text-cast-iron/60">{plan.description}</p>
               )}
 
               {plan.features.length > 0 && (
                 <ul className="mt-3 space-y-1">
                   {plan.features.map((feature) => (
-                    <li key={feature} className="text-sm text-slate-600">
+                    <li key={feature} className="text-sm text-cast-iron/70">
                       • {feature}
                     </li>
                   ))}
                 </ul>
               )}
 
-              <p className="mt-3 text-sm text-slate-500">
-                <span className="font-medium tabular-nums text-slate-900">
+              <p className="mt-3 text-sm text-cast-iron/60">
+                <span className="font-medium tabular-nums text-cast-iron">
                   {plan.restaurant_count}
                 </span>{" "}
                 restaurant{plan.restaurant_count === 1 ? "" : "s"} on this plan

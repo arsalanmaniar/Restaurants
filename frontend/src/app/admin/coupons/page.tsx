@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { Button, Card, EmptyState, ErrorNote, Input, money } from "@/components/ui";
+import { Button, Card, EmptyState, ErrorNote, Input, ROLE_ACCENT, money } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { Coupon, CouponDiscountType, RestaurantSummary } from "@/lib/types";
 
@@ -29,6 +29,9 @@ const EMPTY: Draft = {
   valid_from: "",
   valid_to: "",
 };
+
+const SELECT_CLASS =
+  "w-full rounded-lg border border-cast-iron/20 bg-ash-flour px-3 py-2 text-sm text-cast-iron focus:border-curry-leaf focus:outline-none focus:ring-1 focus:ring-curry-leaf";
 
 export default function CouponsPage() {
   const [coupons, setCoupons] = useState<Coupon[]>([]);
@@ -119,8 +122,8 @@ export default function CouponsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-lg font-semibold text-slate-900">Coupons</h1>
-        <p className="mt-1 text-sm text-slate-500">
+        <h1 className="font-display text-lg font-semibold text-cast-iron">Coupons</h1>
+        <p className="mt-1 text-sm text-cast-iron/60">
           The platform funds every coupon discount, never the restaurant — the
           restaurant is always paid on the full order value. A coupon with no
           restaurant selected is platform-wide.
@@ -129,8 +132,8 @@ export default function CouponsPage() {
 
       {error && <ErrorNote>{error}</ErrorNote>}
 
-      <Card>
-        <h2 className="mb-4 text-sm font-semibold text-slate-900">Add a coupon</h2>
+      <Card accent={ROLE_ACCENT.admin}>
+        <h2 className="mb-4 text-sm font-semibold text-cast-iron">Add a coupon</h2>
         <form onSubmit={createCoupon} className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-3">
             <Input
@@ -144,7 +147,7 @@ export default function CouponsPage() {
               onChange={(e) =>
                 setDraft({ ...draft, discount_type: e.target.value as CouponDiscountType })
               }
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
+              className={SELECT_CLASS}
             >
               <option value="percentage">Percentage off</option>
               <option value="fixed">Fixed amount off</option>
@@ -164,7 +167,7 @@ export default function CouponsPage() {
             <select
               value={draft.restaurant_id}
               onChange={(e) => setDraft({ ...draft, restaurant_id: e.target.value })}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
+              className={SELECT_CLASS}
             >
               <option value="">Platform-wide (any restaurant)</option>
               {restaurants.map((r) => (
@@ -201,7 +204,7 @@ export default function CouponsPage() {
               value={draft.usage_limit}
               onChange={(e) => setDraft({ ...draft, usage_limit: e.target.value })}
             />
-            <label className="flex flex-col gap-1 text-xs text-slate-500">
+            <label className="flex flex-col gap-1 text-xs text-cast-iron/60">
               Valid from (optional)
               <Input
                 type="date"
@@ -209,7 +212,7 @@ export default function CouponsPage() {
                 onChange={(e) => setDraft({ ...draft, valid_from: e.target.value })}
               />
             </label>
-            <label className="flex flex-col gap-1 text-xs text-slate-500">
+            <label className="flex flex-col gap-1 text-xs text-cast-iron/60">
               Valid to (optional)
               <Input
                 type="date"
@@ -219,7 +222,7 @@ export default function CouponsPage() {
             </label>
           </div>
 
-          <Button type="submit" disabled={creating}>
+          <Button type="submit" variant="admin" disabled={creating}>
             {creating ? "Adding…" : "Add coupon"}
           </Button>
         </form>
@@ -232,11 +235,15 @@ export default function CouponsPage() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {coupons.map((coupon) => (
-            <Card key={coupon.id} className={coupon.is_active ? "" : "bg-slate-50 opacity-70"}>
+            <Card
+              key={coupon.id}
+              accent={ROLE_ACCENT.admin}
+              className={coupon.is_active ? "p-5" : "p-5 opacity-60"}
+            >
               <div className="flex items-start justify-between">
                 <div>
-                  <p className="font-mono font-semibold text-slate-900">{coupon.code}</p>
-                  <p className="mt-1 text-2xl font-semibold tabular-nums text-slate-900">
+                  <p className="font-mono font-semibold text-cast-iron">{coupon.code}</p>
+                  <p className="mt-1 text-2xl font-semibold tabular-nums text-cast-iron">
                     {coupon.discount_type === "percentage"
                       ? `${coupon.value}%`
                       : money(coupon.value)}
@@ -244,17 +251,17 @@ export default function CouponsPage() {
                   </p>
                 </div>
                 {!coupon.is_active && (
-                  <span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-600">
+                  <span className="rounded-full bg-cast-iron/10 px-2 py-0.5 text-xs font-semibold text-cast-iron/60">
                     Inactive
                   </span>
                 )}
               </div>
 
-              <p className="mt-2 text-sm text-slate-600">
+              <p className="mt-2 text-sm text-cast-iron/70">
                 {coupon.restaurant_name ? (
                   <>
                     Restricted to{" "}
-                    <span className="font-medium text-slate-900">{coupon.restaurant_name}</span>
+                    <span className="font-medium text-cast-iron">{coupon.restaurant_name}</span>
                   </>
                 ) : (
                   "Platform-wide"
@@ -262,23 +269,23 @@ export default function CouponsPage() {
               </p>
 
               {Number(coupon.min_order_amount) > 0 && (
-                <p className="mt-1 text-sm text-slate-500">
+                <p className="mt-1 text-sm text-cast-iron/60">
                   Minimum order {money(coupon.min_order_amount)}
                 </p>
               )}
               {coupon.discount_type === "percentage" && coupon.max_discount_amount && (
-                <p className="mt-1 text-sm text-slate-500">
+                <p className="mt-1 text-sm text-cast-iron/60">
                   Capped at {money(coupon.max_discount_amount)}
                 </p>
               )}
               {(coupon.valid_from || coupon.valid_to) && (
-                <p className="mt-1 text-sm text-slate-500">
+                <p className="mt-1 text-sm tabular-nums text-cast-iron/60">
                   Valid {coupon.valid_from ?? "…"} to {coupon.valid_to ?? "…"}
                 </p>
               )}
 
-              <p className="mt-3 text-sm text-slate-500">
-                <span className="font-medium tabular-nums text-slate-900">
+              <p className="mt-3 text-sm text-cast-iron/60">
+                <span className="font-medium tabular-nums text-cast-iron">
                   {coupon.times_redeemed}
                 </span>{" "}
                 redemption{coupon.times_redeemed === 1 ? "" : "s"}

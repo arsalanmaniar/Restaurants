@@ -7,6 +7,8 @@ import {
   Card,
   EmptyState,
   ErrorNote,
+  ROLE_ACCENT,
+  STATUS_ACCENT,
   StatTile,
   StatusBadge,
   money,
@@ -20,6 +22,17 @@ import {
   type OrderStatus,
   type RestaurantStats,
 } from "@/lib/types";
+
+// Every status hue the Ember Bar can render, for the legend strip below — the
+// live order feed may not show the full range at any given moment (e.g. a
+// fresh restaurant with only "pending" orders so far).
+const STATUS_LEGEND: OrderStatus[] = [
+  "pending",
+  "preparing",
+  "ready",
+  "delivered",
+  "cancelled",
+];
 
 // Orders arrive from WhatsApp with no page open, so the list must refresh itself.
 // Polling is the right call at this scale — a few hundred orders/day across 20
@@ -78,22 +91,51 @@ export default function OrdersPage() {
   return (
     <div className="space-y-6">
       <div className="grid gap-4 sm:grid-cols-3">
-        <StatTile label="Active orders" value={stats?.active_orders ?? "—"} />
-        <StatTile label="Orders (24h)" value={stats?.orders_24h ?? "—"} />
+        <StatTile
+          label="Active orders"
+          value={stats?.active_orders ?? "—"}
+          accent={ROLE_ACCENT.restaurant}
+        />
+        <StatTile
+          label="Orders (24h)"
+          value={stats?.orders_24h ?? "—"}
+          accent={ROLE_ACCENT.restaurant}
+        />
         <StatTile
           label="Revenue (24h)"
           value={stats ? money(stats.revenue_24h) : "—"}
+          accent={ROLE_ACCENT.restaurant}
         />
       </div>
 
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-slate-900">
+        <h1 className="font-display text-lg font-semibold text-cast-iron">
           {activeOnly ? "Active orders" : "All orders"}
         </h1>
         <Button variant="secondary" onClick={() => setActiveOnly((v) => !v)}>
           {activeOnly ? "Show all" : "Show active only"}
         </Button>
       </div>
+
+      {/* Status legend — the 5-hue Ember Bar system. Kept here (not a fake
+          order) so every status color is visible even before live orders have
+          moved through the full lifecycle. Safe to delete once real order
+          history covers the range. */}
+      <Card className="flex flex-wrap items-center gap-x-6 gap-y-2 p-4">
+        <span className="text-xs font-semibold uppercase tracking-wide text-cast-iron/50">
+          Status legend
+        </span>
+        {STATUS_LEGEND.map((s) => (
+          <span key={s} className="flex items-center gap-2 text-sm text-cast-iron">
+            <span
+              aria-hidden
+              className="h-3 w-[3px] rounded-full"
+              style={{ backgroundColor: STATUS_ACCENT[s] }}
+            />
+            <StatusBadge status={s} />
+          </span>
+        ))}
+      </Card>
 
       {error && <ErrorNote>{error}</ErrorNote>}
 
@@ -108,33 +150,33 @@ export default function OrdersPage() {
       ) : (
         <div className="space-y-3">
           {orders.map((order) => (
-            <Card key={order.id}>
+            <Card key={order.id} accent={STATUS_ACCENT[order.status]} className="p-5 pl-6">
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-3">
-                    <span className="font-semibold text-slate-900">
+                    <span className="font-semibold tabular-nums text-cast-iron">
                       {order.order_number}
                     </span>
                     <StatusBadge status={order.status} />
-                    <span className="text-sm text-slate-400">
+                    <span className="text-sm tabular-nums text-cast-iron/40">
                       {timeAgo(order.placed_at)}
                     </span>
                   </div>
 
-                  <ul className="mt-3 space-y-1 text-sm text-slate-700">
+                  <ul className="mt-3 space-y-1 text-sm text-cast-iron/80">
                     {order.items.map((item) => (
                       <li key={item.id}>
                         <span className="font-medium tabular-nums">{item.quantity}×</span>{" "}
                         {item.item_name}
                         {item.notes && (
-                          <span className="text-slate-500"> — {item.notes}</span>
+                          <span className="text-cast-iron/50"> — {item.notes}</span>
                         )}
                       </li>
                     ))}
                   </ul>
 
                   {order.delivery_address_text && (
-                    <p className="mt-3 text-sm text-slate-500">
+                    <p className="mt-3 text-sm text-cast-iron/50">
                       {order.delivery_address_text}
                     </p>
                   )}
@@ -142,10 +184,10 @@ export default function OrdersPage() {
 
                 <div className="flex flex-col items-end gap-3">
                   <div className="text-right">
-                    <p className="text-lg font-semibold tabular-nums text-slate-900">
+                    <p className="text-lg font-semibold tabular-nums text-cast-iron">
                       {money(order.total_amount)}
                     </p>
-                    <p className="text-xs text-slate-500">
+                    <p className="text-xs tabular-nums text-cast-iron/50">
                       incl. {money(order.delivery_fee)} delivery
                     </p>
                   </div>

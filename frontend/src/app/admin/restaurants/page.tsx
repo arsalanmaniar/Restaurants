@@ -7,7 +7,9 @@ import {
   Card,
   EmptyState,
   ErrorNote,
+  ROLE_ACCENT,
   RestaurantStatusBadge,
+  STATUS_ACCENT,
   money,
 } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -17,6 +19,9 @@ import type {
   RestaurantSummary,
   SubscriptionPlan,
 } from "@/lib/types";
+
+const SELECT_CLASS =
+  "rounded-lg border border-cast-iron/20 bg-ash-flour px-2.5 py-2 text-sm text-cast-iron focus:border-curry-leaf focus:outline-none";
 
 export default function AdminRestaurantsPage() {
   const [restaurants, setRestaurants] = useState<RestaurantSummary[]>([]);
@@ -135,22 +140,25 @@ export default function AdminRestaurantsPage() {
 
       {pending.length > 0 && (
         <section>
-          <h1 className="mb-3 text-lg font-semibold text-slate-900">
+          <h1 className="mb-3 font-display text-lg font-semibold text-cast-iron">
             Awaiting approval ({pending.length})
           </h1>
           <div className="space-y-3">
             {pending.map((r) => (
-              <Card key={r.id} className="border-amber-200 bg-amber-50/50">
+              // Reuses the order-status "needs action" gold — an unreviewed signup
+              // is the restaurant-list equivalent of a pending order.
+              <Card key={r.id} accent={STATUS_ACCENT.pending}>
                 <div className="flex flex-wrap items-center justify-between gap-4">
                   <div>
-                    <p className="font-semibold text-slate-900">{r.name}</p>
-                    <p className="text-sm text-slate-600">
+                    <p className="font-semibold text-cast-iron">{r.name}</p>
+                    <p className="text-sm text-cast-iron/70">
                       {r.cuisine_type ?? "—"} · {r.phone}
                     </p>
-                    {r.address && <p className="text-sm text-slate-500">{r.address}</p>}
+                    {r.address && <p className="text-sm text-cast-iron/60">{r.address}</p>}
                   </div>
                   <div className="flex gap-2">
                     <Button
+                      variant="admin"
                       disabled={busyId === r.id}
                       onClick={() => setStatus(r, "active")}
                     >
@@ -172,7 +180,7 @@ export default function AdminRestaurantsPage() {
       )}
 
       <section>
-        <h2 className="mb-3 text-lg font-semibold text-slate-900">
+        <h2 className="mb-3 font-display text-lg font-semibold text-cast-iron">
           All restaurants ({restaurants.length})
         </h2>
 
@@ -181,23 +189,23 @@ export default function AdminRestaurantsPage() {
         ) : (
           <div className="space-y-3">
             {rest.map((r) => (
-              <Card key={r.id}>
+              <Card key={r.id} accent={ROLE_ACCENT.admin}>
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-semibold text-slate-900">{r.name}</span>
+                      <span className="font-semibold text-cast-iron">{r.name}</span>
                       <RestaurantStatusBadge status={r.status} />
                       {!r.is_accepting_orders && r.status === "active" && (
-                        <span className="rounded-full bg-slate-200 px-2.5 py-1 text-xs font-semibold text-slate-600">
+                        <span className="rounded-full bg-cast-iron/10 px-2.5 py-1 text-xs font-semibold text-cast-iron/60">
                           Not taking orders
                         </span>
                       )}
                     </div>
-                    <p className="mt-1 text-sm text-slate-500">
+                    <p className="mt-1 text-sm text-cast-iron/60">
                       {r.cuisine_type ?? "—"} · {r.phone}
                       {r.address ? ` · ${r.address}` : ""}
                     </p>
-                    <p className="mt-2 text-sm text-slate-600">
+                    <p className="mt-2 text-sm text-cast-iron/70">
                       <span className="tabular-nums">{r.order_count}</span> orders ·{" "}
                       <span className="tabular-nums">{money(r.total_revenue)}</span> revenue ·{" "}
                       <span className="font-medium tabular-nums">
@@ -212,7 +220,7 @@ export default function AdminRestaurantsPage() {
                       value={r.subscription_plan_id ?? ""}
                       disabled={busyId === r.id}
                       onChange={(e) => setPlan(r, e.target.value)}
-                      className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none"
+                      className={SELECT_CLASS}
                       aria-label={`Subscription plan for ${r.name}`}
                     >
                       <option value="">No plan</option>
@@ -242,6 +250,7 @@ export default function AdminRestaurantsPage() {
                       </Button>
                     ) : (
                       <Button
+                        variant="admin"
                         disabled={busyId === r.id}
                         onClick={() => setStatus(r, "active")}
                       >

@@ -4,7 +4,13 @@ import { useCallback, useEffect, useState } from "react";
 
 import { Button, ErrorNote, Input, money, timeAgo } from "@/components/ui";
 import { api } from "@/lib/api";
-import type { OrderRefundState } from "@/lib/types";
+import type { OrderRefundState, RefundStatus } from "@/lib/types";
+
+const REFUND_STATUS_STYLES: Record<RefundStatus, string> = {
+  completed: "bg-[#2F5233]/15 text-[#2F5233]",
+  failed: "bg-[#7A3B34]/15 text-[#7A3B34]",
+  pending: "bg-[#E8A33D]/15 text-[#8a5a1f]",
+};
 
 /** Refund controls for one order. Admin-only — the restaurant dashboard never renders
  *  this, and the API would 403 it anyway. */
@@ -96,30 +102,30 @@ export function RefundPanel({
   }
 
   if (!state) {
-    return <p className="text-sm text-slate-500">Loading refunds…</p>;
+    return <p className="text-sm text-cast-iron/60">Loading refunds…</p>;
   }
 
   const paid = Number(state.amount_paid);
   const refundable = Number(state.refundable);
 
   return (
-    <div className="space-y-4 rounded-lg bg-slate-50 p-4">
+    <div className="space-y-4 rounded-lg bg-roasted-almond p-4">
       <div className="grid grid-cols-3 gap-3 text-sm">
         <div>
-          <p className="text-slate-500">Paid</p>
-          <p className="font-semibold tabular-nums text-slate-900">
+          <p className="text-cast-iron/60">Paid</p>
+          <p className="font-semibold tabular-nums text-cast-iron">
             {money(state.amount_paid)}
           </p>
         </div>
         <div>
-          <p className="text-slate-500">Refunded</p>
-          <p className="font-semibold tabular-nums text-slate-900">
+          <p className="text-cast-iron/60">Refunded</p>
+          <p className="font-semibold tabular-nums text-cast-iron">
             {money(state.amount_refunded)}
           </p>
         </div>
         <div>
-          <p className="text-slate-500">Refundable</p>
-          <p className="font-semibold tabular-nums text-emerald-700">
+          <p className="text-cast-iron/60">Refundable</p>
+          <p className="font-semibold tabular-nums text-curry-leaf">
             {money(state.refundable)}
           </p>
         </div>
@@ -132,27 +138,21 @@ export function RefundPanel({
           {state.refunds.map((refund) => (
             <li
               key={refund.id}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-cast-iron/10 bg-ash-flour px-3 py-2 text-sm"
             >
               <div className="min-w-0">
-                <span className="font-semibold tabular-nums text-slate-900">
+                <span className="font-semibold tabular-nums text-cast-iron">
                   {money(refund.amount)}
                 </span>
-                <span className="ml-2 text-slate-600">{refund.reason}</span>
-                <span className="ml-2 text-xs text-slate-400">
+                <span className="ml-2 text-cast-iron/70">{refund.reason}</span>
+                <span className="ml-2 text-xs tabular-nums text-cast-iron/40">
                   {timeAgo(refund.created_at)}
                 </span>
               </div>
 
               <div className="flex items-center gap-2">
                 <span
-                  className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-                    refund.status === "completed"
-                      ? "bg-emerald-100 text-emerald-800"
-                      : refund.status === "failed"
-                        ? "bg-red-100 text-red-800"
-                        : "bg-amber-100 text-amber-800"
-                  }`}
+                  className={`rounded-full px-2 py-0.5 text-xs font-semibold ${REFUND_STATUS_STYLES[refund.status]}`}
                 >
                   {refund.status}
                 </span>
@@ -173,11 +173,11 @@ export function RefundPanel({
       )}
 
       {paid <= 0 ? (
-        <p className="text-sm text-slate-500">
+        <p className="text-sm text-cast-iron/60">
           This order hasn&apos;t been paid, so there is nothing to refund.
         </p>
       ) : refundable <= 0 ? (
-        <p className="text-sm text-slate-500">This order has been fully refunded.</p>
+        <p className="text-sm text-cast-iron/60">This order has been fully refunded.</p>
       ) : (
         <form onSubmit={issue} className="grid gap-2 sm:grid-cols-[8rem_1fr_auto]">
           <Input

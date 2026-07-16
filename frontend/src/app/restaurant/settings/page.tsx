@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { Button, Card, EmptyState, ErrorNote, Input } from "@/components/ui";
+import { Button, Card, EmptyState, ErrorNote, Input, ROLE_ACCENT } from "@/components/ui";
 import { api } from "@/lib/api";
 import {
   DAY_NAMES,
@@ -15,6 +15,9 @@ import {
  *  input doesn't want them. */
 const toInput = (t: string) => t.slice(0, 5);
 const toApi = (t: string) => (t.length === 5 ? `${t}:00` : t);
+
+const TIME_INPUT_CLASS =
+  "rounded border border-cast-iron/20 bg-ash-flour px-1.5 py-1 text-sm tabular-nums text-cast-iron focus:border-marigold-saffron focus:outline-none";
 
 export default function SettingsPage() {
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
@@ -159,21 +162,21 @@ export default function SettingsPage() {
     <div className="space-y-6">
       {error && <ErrorNote>{error}</ErrorNote>}
       {saved && (
-        <p className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{saved}</p>
+        <p className="rounded-lg bg-curry-leaf/10 px-3 py-2 text-sm text-curry-leaf">{saved}</p>
       )}
 
-      <Card>
+      <Card accent={ROLE_ACCENT.restaurant}>
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <p className="text-sm font-medium text-slate-500">Right now you are</p>
+            <p className="text-sm font-medium text-cast-iron/60">Right now you are</p>
             <p
-              className={`text-2xl font-semibold ${
-                openState?.is_open ? "text-emerald-600" : "text-red-600"
+              className={`font-display text-2xl font-semibold ${
+                openState?.is_open ? "text-curry-leaf" : "text-[#7A3B34]"
               }`}
             >
               {openState?.is_open ? "Open for orders" : "Closed"}
             </p>
-            <p className="mt-1 text-sm text-slate-500">
+            <p className="mt-1 text-sm text-cast-iron/60">
               {!restaurant.is_accepting_orders
                 ? "You have paused orders manually."
                 : openState?.has_schedule
@@ -191,12 +194,12 @@ export default function SettingsPage() {
         </div>
       </Card>
 
-      <Card>
-        <h2 className="mb-4 text-sm font-semibold text-slate-900">Restaurant details</h2>
+      <Card accent={ROLE_ACCENT.restaurant}>
+        <h2 className="mb-4 text-sm font-semibold text-cast-iron">Restaurant details</h2>
         <form onSubmit={saveProfile} className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-slate-700">Name</label>
+              <label className="mb-1.5 block text-sm font-medium text-cast-iron/80">Name</label>
               <Input
                 required
                 value={restaurant.name}
@@ -204,7 +207,7 @@ export default function SettingsPage() {
               />
             </div>
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label className="mb-1.5 block text-sm font-medium text-cast-iron/80">
                 Contact phone
               </label>
               <Input
@@ -216,7 +219,7 @@ export default function SettingsPage() {
           </div>
 
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-slate-700">Address</label>
+            <label className="mb-1.5 block text-sm font-medium text-cast-iron/80">Address</label>
             <Input
               value={restaurant.address ?? ""}
               onChange={(e) => set({ address: e.target.value })}
@@ -224,7 +227,7 @@ export default function SettingsPage() {
           </div>
 
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-slate-700">
+            <label className="mb-1.5 block text-sm font-medium text-cast-iron/80">
               Description
             </label>
             <Input
@@ -236,7 +239,7 @@ export default function SettingsPage() {
 
           <div className="grid gap-4 sm:grid-cols-3">
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-slate-700">Cuisine</label>
+              <label className="mb-1.5 block text-sm font-medium text-cast-iron/80">Cuisine</label>
               <Input
                 value={restaurant.cuisine_type ?? ""}
                 onChange={(e) => set({ cuisine_type: e.target.value })}
@@ -244,7 +247,7 @@ export default function SettingsPage() {
               />
             </div>
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label className="mb-1.5 block text-sm font-medium text-cast-iron/80">
                 Delivery fee (Rs.)
               </label>
               <Input
@@ -256,7 +259,7 @@ export default function SettingsPage() {
               />
             </div>
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label className="mb-1.5 block text-sm font-medium text-cast-iron/80">
                 Minimum order (Rs.)
               </label>
               <Input
@@ -271,30 +274,30 @@ export default function SettingsPage() {
 
           {/* Commission is intentionally absent: it's the platform's to set, and the
               API rejects it from this endpoint. */}
-          <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2">
-            <span className="text-sm text-slate-600">
+          <div className="flex items-center justify-between rounded-lg bg-roasted-almond px-3 py-2">
+            <span className="text-sm text-cast-iron/70">
               Commission rate:{" "}
-              <span className="font-semibold text-slate-900">
+              <span className="font-semibold tabular-nums text-cast-iron">
                 {restaurant.commission_rate}%
               </span>
             </span>
-            <span className="text-xs text-slate-500">Set by AbhiAya — contact admin to change</span>
+            <span className="text-xs text-cast-iron/50">Set by AbhiAya — contact admin to change</span>
           </div>
 
-          <Button type="submit" disabled={savingProfile}>
+          <Button type="submit" variant="primary" disabled={savingProfile}>
             {savingProfile ? "Saving…" : "Save details"}
           </Button>
         </form>
       </Card>
 
-      <Card>
+      <Card accent={ROLE_ACCENT.restaurant}>
         <div className="mb-1 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-900">Opening hours</h2>
+          <h2 className="text-sm font-semibold text-cast-iron">Opening hours</h2>
           <Button variant="secondary" disabled={savingHours} onClick={saveHours}>
             {savingHours ? "Saving…" : "Save hours"}
           </Button>
         </div>
-        <p className="mb-4 text-sm text-slate-500">
+        <p className="mb-4 text-sm text-cast-iron/60">
           Customers can only order while you&apos;re open. Add two periods for a split shift
           (e.g. lunch and dinner). Leave a day empty to stay closed that day.
         </p>
@@ -308,44 +311,44 @@ export default function SettingsPage() {
             return (
               <div
                 key={day}
-                className="flex flex-wrap items-center gap-3 border-b border-slate-100 pb-3 last:border-0"
+                className="flex flex-wrap items-center gap-3 border-b border-cast-iron/10 pb-3 last:border-0"
               >
-                <span className="w-24 shrink-0 text-sm font-medium text-slate-700">{day}</span>
+                <span className="w-24 shrink-0 text-sm font-medium text-cast-iron/80">{day}</span>
 
                 <div className="flex flex-1 flex-wrap items-center gap-2">
                   {dayPeriods.length === 0 && (
-                    <span className="text-sm text-slate-400">Closed</span>
+                    <span className="text-sm text-cast-iron/40">Closed</span>
                   )}
 
                   {dayPeriods.map(({ period, index: i }) => (
                     <div
                       key={i}
-                      className="flex items-center gap-1.5 rounded-lg bg-slate-50 px-2 py-1"
+                      className="flex items-center gap-1.5 rounded-lg bg-roasted-almond px-2 py-1"
                     >
                       <input
                         type="time"
                         value={toInput(period.opens_at)}
                         onChange={(e) => updatePeriod(i, { opens_at: e.target.value })}
-                        className="rounded border border-slate-300 px-1.5 py-1 text-sm"
+                        className={TIME_INPUT_CLASS}
                       />
-                      <span className="text-slate-400">–</span>
+                      <span className="text-cast-iron/40">–</span>
                       <input
                         type="time"
                         value={toInput(period.closes_at)}
                         onChange={(e) => updatePeriod(i, { closes_at: e.target.value })}
-                        className="rounded border border-slate-300 px-1.5 py-1 text-sm"
+                        className={TIME_INPUT_CLASS}
                       />
                       {period.crosses_midnight && (
                         <span
                           title="This period runs past midnight"
-                          className="rounded bg-indigo-100 px-1.5 py-0.5 text-xs font-medium text-indigo-700"
+                          className="rounded bg-[#E8A33D]/15 px-1.5 py-0.5 text-xs font-medium text-[#8a5a1f]"
                         >
                           +1d
                         </span>
                       )}
                       <button
                         onClick={() => removePeriod(i)}
-                        className="px-1 text-slate-400 hover:text-red-600"
+                        className="px-1 text-cast-iron/40 hover:text-[#7A3B34]"
                         aria-label="Remove period"
                       >
                         ×
@@ -355,7 +358,7 @@ export default function SettingsPage() {
 
                   <button
                     onClick={() => addPeriod(index)}
-                    className="rounded-lg border border-dashed border-slate-300 px-2 py-1 text-sm text-slate-500 hover:border-slate-400 hover:text-slate-700"
+                    className="rounded-lg border border-dashed border-cast-iron/20 px-2 py-1 text-sm text-cast-iron/50 hover:border-cast-iron/40 hover:text-cast-iron/80"
                   >
                     + Add period
                   </button>

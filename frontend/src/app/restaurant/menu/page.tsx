@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { Button, Card, EmptyState, ErrorNote, Input, money } from "@/components/ui";
+import { Button, Card, EmptyState, ErrorNote, Input, ROLE_ACCENT, money } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { Category, MenuItem } from "@/lib/types";
 
@@ -14,6 +14,9 @@ interface Draft {
 }
 
 const EMPTY_DRAFT: Draft = { name: "", price: "", description: "", category_id: "" };
+
+const SELECT_CLASS =
+  "rounded-lg border border-cast-iron/20 bg-ash-flour px-3 py-2 text-sm text-cast-iron focus:border-marigold-saffron focus:outline-none focus:ring-1 focus:ring-marigold-saffron";
 
 export default function MenuPage() {
   const [items, setItems] = useState<MenuItem[]>([]);
@@ -139,12 +142,12 @@ export default function MenuPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-lg font-semibold text-slate-900">Menu</h1>
+      <h1 className="font-display text-lg font-semibold text-cast-iron">Menu</h1>
 
       {error && <ErrorNote>{error}</ErrorNote>}
 
-      <Card>
-        <h2 className="mb-4 text-sm font-semibold text-slate-900">Add an item</h2>
+      <Card accent={ROLE_ACCENT.restaurant}>
+        <h2 className="mb-4 text-sm font-semibold text-cast-iron">Add an item</h2>
         <form onSubmit={createItem} className="grid gap-3 sm:grid-cols-[2fr_1fr_1fr_auto]">
           <Input
             required
@@ -164,7 +167,7 @@ export default function MenuPage() {
           <select
             value={draft.category_id}
             onChange={(e) => setDraft({ ...draft, category_id: e.target.value })}
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none"
+            className={SELECT_CLASS}
           >
             <option value="">No category</option>
             {categories.map((c) => (
@@ -173,7 +176,7 @@ export default function MenuPage() {
               </option>
             ))}
           </select>
-          <Button type="submit" disabled={adding}>
+          <Button type="submit" variant="primary" disabled={adding}>
             {adding ? "Adding…" : "Add"}
           </Button>
         </form>
@@ -186,7 +189,11 @@ export default function MenuPage() {
       ) : (
         <div className="space-y-2">
           {items.map((item) => (
-            <Card key={item.id} className={item.is_available ? "" : "bg-slate-50"}>
+            <Card
+              key={item.id}
+              accent={ROLE_ACCENT.restaurant}
+              className={item.is_available ? "p-5" : "p-5 opacity-60"}
+            >
               {editingId === item.id ? (
                 <div className="grid gap-3 sm:grid-cols-[2fr_1fr_1fr_auto_auto]">
                   <Input
@@ -205,7 +212,7 @@ export default function MenuPage() {
                     onChange={(e) =>
                       setEditDraft({ ...editDraft, category_id: e.target.value })
                     }
-                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    className={SELECT_CLASS}
                   >
                     <option value="">No category</option>
                     {categories.map((c) => (
@@ -214,7 +221,7 @@ export default function MenuPage() {
                       </option>
                     ))}
                   </select>
-                  <Button disabled={busyId === item.id} onClick={() => saveEdit(item)}>
+                  <Button variant="primary" disabled={busyId === item.id} onClick={() => saveEdit(item)}>
                     Save
                   </Button>
                   <Button variant="secondary" onClick={() => setEditingId(null)}>
@@ -227,32 +234,32 @@ export default function MenuPage() {
                     <div className="flex items-center gap-2">
                       <span
                         className={`font-medium ${
-                          item.is_available ? "text-slate-900" : "text-slate-400 line-through"
+                          item.is_available ? "text-cast-iron" : "text-cast-iron/40 line-through"
                         }`}
                       >
                         {item.name}
                       </span>
-                      <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500">
+                      <span className="rounded bg-cast-iron/10 px-1.5 py-0.5 text-xs text-cast-iron/60">
                         {categoryName(item.category_id)}
                       </span>
                     </div>
                     {item.description && (
-                      <p className="mt-0.5 text-sm text-slate-500">{item.description}</p>
+                      <p className="mt-0.5 text-sm text-cast-iron/60">{item.description}</p>
                     )}
                   </div>
 
                   <div className="flex items-center gap-4">
-                    <span className="font-semibold tabular-nums text-slate-900">
+                    <span className="font-semibold tabular-nums text-cast-iron">
                       {money(item.price)}
                     </span>
 
-                    <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-600">
+                    <label className="flex cursor-pointer items-center gap-2 text-sm text-cast-iron/70">
                       <input
                         type="checkbox"
                         checked={item.is_available}
                         disabled={busyId === item.id}
                         onChange={() => toggleAvailability(item)}
-                        className="h-4 w-4 rounded border-slate-300"
+                        className="h-4 w-4 rounded border-cast-iron/30 text-marigold-saffron focus:ring-marigold-saffron"
                       />
                       In stock
                     </label>

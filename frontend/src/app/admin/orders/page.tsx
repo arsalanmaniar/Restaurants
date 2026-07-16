@@ -7,6 +7,7 @@ import {
   Card,
   EmptyState,
   ErrorNote,
+  STATUS_ACCENT,
   StatusBadge,
   money,
   timeAgo,
@@ -20,6 +21,9 @@ import {
 } from "@/lib/types";
 
 const ALL = "all";
+
+const SELECT_CLASS =
+  "rounded-lg border border-cast-iron/20 bg-ash-flour px-3 py-2 text-sm text-cast-iron focus:border-curry-leaf focus:outline-none focus:ring-1 focus:ring-curry-leaf";
 
 export default function AdminOrdersPage() {
   const [orders, setOrders] = useState<AdminOrder[]>([]);
@@ -58,15 +62,12 @@ export default function AdminOrdersPage() {
     load();
   }, [load]);
 
-  const selectClass =
-    "rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none";
-
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-lg font-semibold text-slate-900">All orders</h1>
-          <p className="mt-0.5 text-sm text-slate-500">
+          <h1 className="font-display text-lg font-semibold text-cast-iron">All orders</h1>
+          <p className="mt-0.5 text-sm text-cast-iron/60">
             Click an order to see its items, payments, and to issue a refund.
           </p>
         </div>
@@ -75,7 +76,7 @@ export default function AdminOrdersPage() {
           <select
             value={restaurantFilter}
             onChange={(e) => setRestaurantFilter(e.target.value)}
-            className={selectClass}
+            className={SELECT_CLASS}
           >
             <option value={ALL}>All restaurants</option>
             {restaurants.map((r) => (
@@ -88,7 +89,7 @@ export default function AdminOrdersPage() {
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className={selectClass}
+            className={SELECT_CLASS}
           >
             <option value={ALL}>Any status</option>
             {(Object.keys(STATUS_LABELS) as OrderStatus[]).map((s) => (
@@ -110,7 +111,7 @@ export default function AdminOrdersPage() {
         <Card className="overflow-x-auto p-0">
           <table className="w-full min-w-[720px] text-sm">
             <thead>
-              <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
+              <tr className="border-b border-cast-iron/10 text-left text-xs uppercase tracking-wide text-cast-iron/50">
                 <th className="px-5 py-3 font-medium">Order</th>
                 <th className="px-5 py-3 font-medium">Restaurant</th>
                 <th className="px-5 py-3 font-medium">Customer</th>
@@ -124,62 +125,71 @@ export default function AdminOrdersPage() {
                 <Fragment key={order.id}>
                   <tr
                     onClick={() => setExpanded(expanded === order.id ? null : order.id)}
-                    className="cursor-pointer border-b border-slate-100 last:border-0 hover:bg-slate-50"
+                    className="cursor-pointer border-b border-cast-iron/10 last:border-0 hover:bg-roasted-almond/50"
+                    // Ember Bar for a table row: an inset left box-shadow in the
+                    // order's status color, same mechanic as the active-nav underline.
+                    style={{ boxShadow: `inset 3px 0 0 0 ${STATUS_ACCENT[order.status]}` }}
                   >
                     <td className="px-5 py-3">
-                      <p className="font-medium text-slate-900">
-                        <span className="mr-1.5 inline-block text-slate-400">
+                      <p className="font-medium tabular-nums text-cast-iron">
+                        <span className="mr-1.5 inline-block text-cast-iron/40">
                           {expanded === order.id ? "▾" : "▸"}
                         </span>
                         {order.order_number}
                       </p>
-                      <p className="pl-4 text-xs text-slate-500">
+                      <p className="pl-4 text-xs tabular-nums text-cast-iron/50">
                         {order.items.reduce((sum, i) => sum + i.quantity, 0)} items ·{" "}
                         {timeAgo(order.placed_at)}
                       </p>
                     </td>
-                    <td className="px-5 py-3 text-slate-700">{order.restaurant_name}</td>
-                    <td className="px-5 py-3 tabular-nums text-slate-700">
+                    <td className="px-5 py-3 text-cast-iron/80">{order.restaurant_name}</td>
+                    <td className="px-5 py-3 tabular-nums text-cast-iron/80">
                       {order.customer_number}
                     </td>
                     <td className="px-5 py-3">
                       <StatusBadge status={order.status} />
                     </td>
-                    <td className="px-5 py-3 text-right font-medium tabular-nums text-slate-900">
+                    <td className="px-5 py-3 text-right font-medium tabular-nums text-cast-iron">
                       {money(order.total_amount)}
                     </td>
-                    <td className="px-5 py-3 text-right tabular-nums text-emerald-700">
+                    <td className="px-5 py-3 text-right tabular-nums text-curry-leaf">
                       {money(order.commission_amount)}
                     </td>
                   </tr>
 
                   {expanded === order.id && (
-                    <tr className="border-b border-slate-100 bg-slate-50/50">
+                    <tr className="border-b border-cast-iron/10">
                       <td colSpan={6} className="px-5 py-4">
-                        <div className="mb-3">
-                          <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Items
-                          </p>
-                          <ul className="text-sm text-slate-700">
-                            {order.items.map((item) => (
-                              <li key={item.id}>
-                                <span className="tabular-nums">{item.quantity}×</span>{" "}
-                                {item.item_name} —{" "}
-                                <span className="tabular-nums">{money(item.line_total)}</span>
-                              </li>
-                            ))}
-                          </ul>
-                          {order.delivery_address_text && (
-                            <p className="mt-2 text-sm text-slate-500">
-                              {order.delivery_address_text}
+                        {/* "Same card, deeper" — ash-flour again, just with an inset
+                            border, not a color wash. */}
+                        <div className="space-y-3 rounded-lg border border-cast-iron/10 bg-ash-flour p-4">
+                          <div>
+                            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-cast-iron/50">
+                              Items
                             </p>
-                          )}
-                        </div>
+                            <ul className="text-sm text-cast-iron/80">
+                              {order.items.map((item) => (
+                                <li key={item.id}>
+                                  <span className="tabular-nums">{item.quantity}×</span>{" "}
+                                  {item.item_name} —{" "}
+                                  <span className="tabular-nums">{money(item.line_total)}</span>
+                                </li>
+                              ))}
+                            </ul>
+                            {order.delivery_address_text && (
+                              <p className="mt-2 text-sm text-cast-iron/60">
+                                {order.delivery_address_text}
+                              </p>
+                            )}
+                          </div>
 
-                        <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                          Payments &amp; refunds
-                        </p>
-                        <RefundPanel orderId={order.id} onChanged={load} />
+                          <div>
+                            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-cast-iron/50">
+                              Payments &amp; refunds
+                            </p>
+                            <RefundPanel orderId={order.id} onChanged={load} />
+                          </div>
+                        </div>
                       </td>
                     </tr>
                   )}

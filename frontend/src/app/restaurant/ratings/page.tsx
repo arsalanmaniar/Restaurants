@@ -2,15 +2,15 @@
 
 import { useEffect, useState } from "react";
 
-import { Card, EmptyState, ErrorNote, timeAgo } from "@/components/ui";
+import { Card, EmptyState, ErrorNote, ROLE_ACCENT, STATUS_ACCENT, timeAgo } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { Rating, RatingSummary } from "@/lib/types";
 
 function Stars({ score }: { score: number }) {
   return (
-    <span className="text-amber-500" aria-label={`${score} out of 5`}>
+    <span className="text-marigold-saffron" aria-label={`${score} out of 5`}>
       {"★".repeat(score)}
-      <span className="text-slate-300">{"★".repeat(5 - score)}</span>
+      <span className="text-cast-iron/15">{"★".repeat(5 - score)}</span>
     </span>
   );
 }
@@ -46,21 +46,21 @@ export default function RatingsPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-lg font-semibold text-slate-900">Customer ratings</h1>
+      <h1 className="font-display text-lg font-semibold text-cast-iron">Customer ratings</h1>
 
       {error && <ErrorNote>{error}</ErrorNote>}
 
-      <Card>
+      <Card accent={ROLE_ACCENT.restaurant}>
         {summary && summary.count > 0 ? (
           <div className="flex flex-wrap items-center gap-8">
             <div>
-              <p className="text-4xl font-semibold tabular-nums text-slate-900">
+              <p className="text-4xl font-semibold tabular-nums text-cast-iron">
                 {summary.average?.toFixed(1)}
               </p>
               <div className="mt-1">
                 <Stars score={Math.round(summary.average ?? 0)} />
               </div>
-              <p className="mt-1 text-sm text-slate-500">
+              <p className="mt-1 text-sm text-cast-iron/60">
                 {summary.count} rating{summary.count === 1 ? "" : "s"}
               </p>
             </div>
@@ -72,24 +72,24 @@ export default function RatingsPage() {
                 const count = Number(summary.breakdown[String(score)] ?? 0);
                 return (
                   <div key={score} className="flex items-center gap-2 text-sm">
-                    <span className="w-3 tabular-nums text-slate-500">{score}</span>
-                    <span className="text-amber-500">★</span>
-                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100">
+                    <span className="w-3 tabular-nums text-cast-iron/60">{score}</span>
+                    <span className="text-marigold-saffron">★</span>
+                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-cast-iron/10">
                       <div
                         className={`h-full rounded-full ${
-                          score <= 2 ? "bg-red-500" : "bg-emerald-500"
+                          score <= 2 ? "bg-[#7A3B34]" : "bg-curry-leaf"
                         }`}
                         style={{ width: `${(count / max) * 100}%` }}
                       />
                     </div>
-                    <span className="w-6 text-right tabular-nums text-slate-500">{count}</span>
+                    <span className="w-6 text-right tabular-nums text-cast-iron/60">{count}</span>
                   </div>
                 );
               })}
             </div>
           </div>
         ) : (
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-cast-iron/60">
             No ratings yet. Customers will be asked to rate their order on WhatsApp once it
             has been delivered.
           </p>
@@ -99,23 +99,26 @@ export default function RatingsPage() {
       {ratings.length > 0 && (
         <div className="space-y-3">
           {ratings.map((rating) => (
-            <Card key={rating.id} className={rating.rating <= 2 ? "border-red-200" : ""}>
+            <Card
+              key={rating.id}
+              accent={rating.rating <= 2 ? STATUS_ACCENT.cancelled : ROLE_ACCENT.restaurant}
+            >
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-3">
                     <Stars score={rating.rating} />
-                    <span className="text-sm font-medium text-slate-700">
+                    <span className="text-sm font-medium text-cast-iron/80">
                       {rating.order_number}
                     </span>
-                    <span className="text-sm text-slate-400">
+                    <span className="text-sm tabular-nums text-cast-iron/40">
                       {timeAgo(rating.created_at)}
                     </span>
                   </div>
                   {rating.comment && (
-                    <p className="mt-2 text-sm text-slate-700">“{rating.comment}”</p>
+                    <p className="mt-2 text-sm text-cast-iron/80">“{rating.comment}”</p>
                   )}
                 </div>
-                <span className="text-sm tabular-nums text-slate-400">
+                <span className="text-sm tabular-nums text-cast-iron/40">
                   {rating.customer_number}
                 </span>
               </div>
