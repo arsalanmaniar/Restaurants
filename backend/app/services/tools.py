@@ -16,6 +16,7 @@ from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import settings
 from app.services import coupons as coupons_service
@@ -265,12 +266,30 @@ def add_to_cart(
             ),
         }
 
+    # IMMUTABLE-STYLE UPDATE: never mutate a dict that is already inside
+    # `conversation.cart`. In-place mutation (`line["quantity"] = new`) silently
+    # bypasses SQLAlchemy's JSONB change detection — the mutation lands in the
+    # attribute before the reassignment below, so the "new" cart value ends up
+    # structurally identical to the current one and the UPDATE never fires.
+    # Real customer impact (conv#643): quantity increments were lost, place_order
+    # then saw the wrong cart total and hit below_minimum unexpectedly. Always
+    # build a fresh dict for the changed line.
+    new_lines: list[dict] = []
+    matched = False
     for line in lines:
-        if line["menu_item_id"] == menu_item_id and line.get("notes") == notes:
-            line["quantity"] = min(line["quantity"] + quantity, MAX_QUANTITY_PER_LINE)
-            break
-    else:
-        lines.append(
+        if (
+            not matched
+            and line["menu_item_id"] == menu_item_id
+            and line.get("notes") == notes
+        ):
+            new_lines.append(
+                {**line, "quantity": min(line["quantity"] + quantity, MAX_QUANTITY_PER_LINE)}
+            )
+            matched = True
+        else:
+            new_lines.append(line)
+    if not matched:
+        new_lines.append(
             {
                 "menu_item_id": item.id,
                 # Pinned to the line, so the cart's restaurant cannot drift when the
@@ -283,9 +302,13 @@ def add_to_cart(
             }
         )
 
-    conversation.cart = {"items": lines}
+    conversation.cart = {"items": new_lines}
+    # Belt-and-braces: if some future refactor slips in an in-place mutation
+    # again, this call keeps the write from silently vanishing.
+    flag_modified(conversation, "cart")
     conversation.active_restaurant_id = item.restaurant_id
     conversation.state = ConversationState.ORDERING
+    lines = new_lines
 
     subtotal = sum(Decimal(line["price"]) * line["quantity"] for line in lines)
     return {

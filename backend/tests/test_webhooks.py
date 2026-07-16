@@ -44,6 +44,13 @@ def no_ai(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_webhook_secret(monkeypatch):
+    """Baseline: clear the webhook secret so posts without ?secret= are accepted.
+    Tests that specifically exercise the secret gate re-set it via monkeypatch."""
+    monkeypatch.setattr(settings, "ultramsg_webhook_secret", "")
+
+
 class TestSecret:
     def test_wrong_secret_is_rejected(self, client, monkeypatch):
         monkeypatch.setattr(settings, "ultramsg_webhook_secret", "s3cret")

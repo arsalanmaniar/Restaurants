@@ -111,11 +111,27 @@ class TestDuplicateToolCallGuard:
 
 class TestLeakedToolCallIsNeverSent:
     LEAK = '{"type": "function", "name": "get_menu", "parameters": {"restaurant_id": "Pizza Junction"}}'
+    # Exact string that reached a real customer in conv#634 during live testing.
+    CONV_634_LEAK = (
+        '{"type": "function", "name": "add_to_cart", '
+        '"parameters": {"menu_item_id": "429", "quantity": "2"}}'
+    )
 
     def test_detector(self):
         assert agent._leaks_tool_call(self.LEAK)
+        assert agent._leaks_tool_call(self.CONV_634_LEAK)
+        # OpenAI/Groq response-format shape (arguments, not parameters):
+        assert agent._leaks_tool_call('{"name": "get_menu", "arguments": {"restaurant_id": 3}}')
+        # Qwen-style XML wrapper — will bite us if we ever swap model:
+        assert agent._leaks_tool_call('<tool_call>{"name":"get_menu"}</tool_call>')
         assert agent._leaks_tool_call("<function=get_menu {}></function>")
+        # Embedded in prose is still a leak — the raw JSON must not reach the customer:
+        assert agent._leaks_tool_call(
+            'Let me check that. {"type":"function","name":"get_menu","parameters":{}}'
+        )
+        # Legitimate replies must not trigger the gate:
         assert not agent._leaks_tool_call("Your order is on its way! Total Rs. 2780")
+        assert not agent._leaks_tool_call("What's your name?")
 
     def test_customer_never_receives_raw_json(self, db, conversation, scripted_model,
                                               monkeypatch):
@@ -131,6 +147,25 @@ class TestLeakedToolCallIsNeverSent:
         assert sent, "something must be sent"
         assert not agent._leaks_tool_call(sent[0])
         assert sent[0] == agent.FALLBACK_REPLY
+
+    def test_generate_reply_never_returns_raw_json_even_when_model_persists(
+        self, db, conversation, scripted_model
+    ):
+        """The gate at the outbound edge (handle_incoming_message) is not enough — any
+        caller that uses generate_reply directly (test drivers, batch jobs, an admin
+        replay tool) could receive raw JSON. This is what actually happened in conv#634.
+        generate_reply must be self-defending: after the forced-retry, if the model is
+        still leaking, the returned text must not be raw JSON."""
+        # Two leaked replies in a row: the first triggers the forced-tool retry, the
+        # second (post-retry) would previously fall through and return the leak.
+        scripted_model([completion(message(content=self.CONV_634_LEAK))] * 4)
+
+        reply, _trace = agent.generate_reply(db, conversation)
+
+        assert not agent._leaks_tool_call(reply), (
+            f"generate_reply returned raw tool-call JSON to its caller: {reply!r}"
+        )
+        assert reply == agent.FALLBACK_REPLY
 
 
 class TestNoArgToolCalls:

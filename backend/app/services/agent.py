@@ -85,6 +85,12 @@ The cart is not a scratchpad:
 gives the customer double the food. The current cart is shown to you above, every turn.
 - If the customer is only ASKING about the cart or the total ("how much?", "what did I order?"), \
 just read it off the cart shown above. Do NOT call add_to_cart again.
+- If the customer's message about the cart is AMBIGUOUS — anything that could plausibly mean \
+"add more" OR "keep as is" OR "remove" — ASK to clarify before touching the cart. Do not guess. \
+Cart mistakes cost the customer money. Especially when their message contains a negation \
+("not", "no", "don't", "nahi", "sirf", "only", "bas") near an item name: read the words back \
+and confirm. e.g. "Not only chicken biryani" could mean "just the one biryani, nothing else" \
+or "add something besides biryani" — you cannot tell, so ask. Never silently change quantity.
 
 Never place an order twice:
 - place_order is the only tool that spends the customer's money. Call it ONCE, only when the \
@@ -285,19 +291,35 @@ def _is_stall(text: str | None) -> bool:
 def _leaks_tool_call(text: str | None) -> bool:
     """True if the model printed its tool call as prose instead of calling it.
 
-    Observed in the wild — the customer received, verbatim:
-        {"type": "function", "name": "get_menu", "parameters": {...}}
-    This must never reach WhatsApp, so it is checked on every outbound reply
-    regardless of which code path produced it.
+    Observed in the wild — the customer received, verbatim (conv#634):
+        {"type": "function", "name": "add_to_cart", "parameters": {"menu_item_id": "429", "quantity": "2"}}
+    "arguments" is the OpenAI/Groq response-format field name; a model that
+    hallucinates its own response shape uses that instead of "parameters".
+    <tool_call>...</tool_call> is the format Qwen and some other models use.
+    This must never reach WhatsApp regardless of which code path produced it.
     """
     if not text:
         return False
     lowered = text.lower()
-    return ('"name"' in lowered and '"parameters"' in lowered) or (
-        '"type": "function"' in lowered
+    has_name = '"name"' in lowered
+    return (
+        (has_name and '"parameters"' in lowered)
+        or (has_name and '"arguments"' in lowered)
+        or '"type": "function"' in lowered
         or '"type":"function"' in lowered
         or "<function=" in lowered
+        or "<tool_call>" in lowered
     )
+
+
+def _safe_text(text: str | None) -> str:
+    """Every text reply generate_reply hands back goes through this — even if the
+    model persists in emitting raw tool-call JSON after the forced-retry, the
+    caller (test driver, batch job, webhook) never sees it. Empty strings are
+    preserved so callers can distinguish 'no reply' from 'leaked reply'."""
+    if text and _leaks_tool_call(text):
+        return FALLBACK_REPLY
+    return text or ""
 
 
 def _force_text_reply(client: Groq, messages: list[dict]) -> str:
@@ -372,7 +394,7 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
             logger.warning(
                 "conversation %s: malformed tool call, falling back to text", conversation.id
             )
-            return _force_text_reply(client, messages), trace
+            return _safe_text(_force_text_reply(client, messages)), trace
 
         choice = completion.choices[0].message
         force_next = False
@@ -403,7 +425,11 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                 )
                 continue
 
-            return text, trace
+            # Even if the retry above already ran and the model is STILL emitting raw
+            # tool-call JSON, callers that skip handle_incoming_message (test drivers,
+            # batch jobs) would receive it. _safe_text is the belt-and-braces gate that
+            # makes this impossible from any code path.
+            return _safe_text(text), trace
 
         # Echo the assistant's tool-call turn back verbatim; the API requires each
         # tool result to reference the call that produced it.
@@ -460,7 +486,7 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
     # have already run — the old behaviour ("sorry, say that again") hid a real
     # order from the customer, who then re-ordered. Force a reply from the results.
     logger.warning("conversation %s hit MAX_TOOL_ROUNDS; forcing a text reply", conversation.id)
-    return _force_text_reply(client, messages), trace
+    return _safe_text(_force_text_reply(client, messages)), trace
 
 
 def handle_incoming_message(db: Session, conversation: Conversation, _body: str) -> None:

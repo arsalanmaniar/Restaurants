@@ -77,6 +77,35 @@ class TestAddToCart:
         assert Decimal(line["price"]) == menu_item.price
         assert Decimal(result["subtotal"]) == menu_item.price * 2
 
+    def test_quantity_increment_survives_a_flush(self, db, conversation, pizza, menu_item):
+        """Real customer impact (conv#643): the model told the customer '2 biryanis,
+        Rs. 900', but the second add_to_cart's quantity increment never reached the
+        DB. On the next turn, place_order loaded cart=1 (Rs. 450), tripped the
+        below_minimum guard, and the order silently failed.
+
+        Root cause: add_to_cart used to mutate the existing line dict IN PLACE
+        (line['quantity'] += 1). SQLAlchemy's JSONB column has no MutableDict
+        wrapper, so by the time the tool reassigned conversation.cart, the
+        'new' value was structurally identical to the (already-mutated) current
+        value — SQLAlchemy saw no change and skipped the UPDATE.
+
+        This test flushes and expires between adds, forcing a fresh read from
+        the DB. In-memory-only assertions never caught this."""
+        tools.get_menu(db, conversation, restaurant_id=pizza.id)
+
+        tools.add_to_cart(db, conversation, menu_item_id=menu_item.id, quantity=1)
+        db.flush()
+        db.expire(conversation)
+        assert conversation.cart["items"][0]["quantity"] == 1, "first add did not persist"
+
+        tools.add_to_cart(db, conversation, menu_item_id=menu_item.id, quantity=1)
+        db.flush()
+        db.expire(conversation)
+        assert conversation.cart["items"][0]["quantity"] == 2, (
+            "quantity increment was lost between turns — place_order will see the "
+            "wrong subtotal"
+        )
+
     def test_rejects_an_item_the_model_never_saw(self, db, conversation, pizza):
         """The model has been caught inventing plausible ids (1, 2, 12345) and ordering
         food from the wrong restaurant. An id is only valid if get_menu returned it."""
