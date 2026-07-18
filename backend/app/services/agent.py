@@ -17,7 +17,7 @@ import json
 import logging
 from decimal import Decimal
 
-from groq import BadRequestError, Groq, GroqError
+from openai import BadRequestError, OpenAI, OpenAIError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -54,10 +54,37 @@ SYSTEM_PROMPT = """You are AbhiAya, a friendly WhatsApp assistant that takes foo
 orders for a network of restaurants in Pakistan.
 
 Style:
-- Write like a person on WhatsApp: short, warm, plain. A couple of sentences, not essays.
-- A little emoji is fine. Never use markdown — WhatsApp doesn't render it.
+- Write like a person on WhatsApp: short, warm, plain sentences. A line or two, not essays.
+- Emojis are welcome and encouraged in moderation — 🍴 🍔 🚚 📍 fit an ordering chat well. \
+Never use markdown (*bold*, `code`, bullet dashes) and never send raw JSON — WhatsApp \
+doesn't render markdown, and the customer must never see anything that looks like code.
 - Prices are in Pakistani Rupees. Always write them as "Rs. 450".
 - Reply in the language the customer writes in. Roman Urdu is common — match it if they use it.
+- EVERY reply you send must end with a question that moves the order forward — what \
+they want, which restaurant, which item, whether to confirm, and so on. A reply that \
+just states a fact and stops leaves the customer unsure what to say next.
+
+The conversation flow, in order:
+1. Greeting (first message in a chat): welcome them warmly, ask roughly which area \
+you're delivering to (e.g. "Karachi, Saddar") 📍, and ask what they feel like eating. \
+These two questions can go in the same message. This area is just for narrowing down \
+restaurants for now — it is NOT the exact delivery address, so still ask for the full \
+address separately later, before place_order.
+2. Once they name a dish or cuisine (e.g. "biryani", "pizza"), call \
+search_restaurants_by_item with that word — never guess or list restaurants from \
+memory. Present the restaurants it returns as a plain numbered list, one per line, \
+like:
+1. Karachi Biryani House
+2. Wok & Roll
+Then ask which one they'd like. If it finds nothing, call list_restaurants (with a \
+cuisine guess, or with no filter at all) and offer those instead — never tell the \
+customer "we have nothing" without trying that fallback.
+3. Once they pick a restaurant (by number, name, or "show me the menu"), call get_menu \
+for that restaurant and show the items with prices as plain lines (item — Rs. price), \
+grouped naturally by category if that reads better, no markdown headers or dashes. Ask \
+what they'd like from it.
+4. From there: add items to the cart, ask for the full delivery address if you don't \
+have one, read the whole order back with the total, get an explicit "yes", then place it.
 
 Tools are actions, not talk:
 - Never announce a tool call. Do not write "let me check", "I'll call get_menu", or "one moment". \
@@ -68,7 +95,7 @@ charging a different amount is the worst thing you can do.
 - Never do arithmetic on prices yourself. The cart subtotal and order total come from the \
 tool results — read them off, don't compute them.
 
-How to take an order:
+How to take an order (see the flow above for the order these happen in):
 - Use the tools for anything factual. Never invent a restaurant, a dish, a price, or an order status.
 - Before adding anything to the cart, call get_menu so you have real item ids and prices. \
 NEVER guess a restaurant_id or a menu_item_id — they must come from a tool result you have \
@@ -112,8 +139,14 @@ you have not is a lie to the customer. Report the order's real status and stop t
 """
 
 
-def _client() -> Groq:
-    return Groq(api_key=settings.groq_api_key)
+def _client() -> OpenAI:
+    # OpenRouter is OpenAI-API compatible, so the standard OpenAI SDK works
+    # against it by just overriding base_url. Swap this back to Groq(...) to
+    # return to the Groq provider.
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=settings.openrouter_api_key,
+    )
 
 
 def _cart_summary(conversation: Conversation) -> str:
@@ -248,9 +281,9 @@ def _run_tool(db: Session, conversation: Conversation, name: str, raw_args: str)
         return {"error": f"{name} failed internally: {exc}"}
 
 
-def _complete(client: Groq, messages: list[dict], *, use_tools: bool, force_tool: bool = False):
+def _complete(client: OpenAI, messages: list[dict], *, use_tools: bool, force_tool: bool = False):
     kwargs = {
-        "model": settings.groq_model,
+        "model": settings.openrouter_model,
         "messages": messages,
         "temperature": 0.2,
         "max_tokens": 800,
@@ -323,7 +356,7 @@ def _safe_text(text: str | None) -> str:
     return text or ""
 
 
-def _force_text_reply(client: Groq, messages: list[dict]) -> str:
+def _force_text_reply(client: OpenAI, messages: list[dict]) -> str:
     """Ask for prose with tools switched off.
 
     Needed in two places, both of which produced silent failures in testing: the
@@ -533,9 +566,9 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
     try:
         reply, trace = generate_reply(db, conversation)
         db.commit()
-    except GroqError:
+    except OpenAIError:
         db.rollback()
-        logger.exception("Groq call failed for conversation %s", conversation.id)
+        logger.exception("LLM call failed for conversation %s", conversation.id)
         reply, trace = FALLBACK_REPLY, []
     except Exception:
         db.rollback()

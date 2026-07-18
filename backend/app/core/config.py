@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
 
+    # OpenRouter (OpenAI-API compatible). Kept alongside groq_* so switchback is
+    # trivial — see app/services/agent.py for which one is actually wired up.
+    openrouter_api_key: str = ""
+    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
+
     ultramsg_instance_id: str = ""
     ultramsg_token: str = ""
     # Shared secret we append to the webhook URL so we can reject unsolicited calls.
