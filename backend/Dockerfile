@@ -32,7 +32,9 @@ COPY --chown=user:user . .
 # Switch to non-root before anything runs.
 USER user
 
-# HF Spaces Docker SDK: the container MUST listen on 7860.
+# HF Spaces Docker SDK expects 7860 (and this is our fallback in entrypoint.sh).
+# Render and similar platforms inject their own $PORT at runtime, which the
+# entrypoint prefers when present. EXPOSE is documentation-only either way.
 EXPOSE 7860
 
 # entrypoint.sh runs alembic upgrade head then starts uvicorn.
