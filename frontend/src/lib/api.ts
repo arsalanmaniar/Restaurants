@@ -2,7 +2,7 @@
 
 import type { LoginResponse } from "./types";
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8020";
 
 const TOKEN_KEY = "abhiaya_token";
 const SESSION_KEY = "abhiaya_session";
