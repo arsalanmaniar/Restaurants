@@ -31,6 +31,35 @@ class TestListRestaurants:
         assert "Pizza Junction" not in names
 
 
+class TestSearchRestaurantsByItem:
+    """Backs the new flow step where the customer names a dish before a restaurant —
+    the AI must find who actually serves it via a real DB query, never a guess."""
+
+    def test_finds_restaurant_serving_the_dish(self, db, conversation, biryani):
+        result = tools.search_restaurants_by_item(db, conversation, query="biryani")
+        names = [r["name"] for r in result["restaurants"]]
+        assert names == ["Karachi Biryani House"]
+        assert any("Biryani" in item for item in result["restaurants"][0]["matched_items"])
+
+    def test_is_case_insensitive_substring(self, db, conversation, pizza):
+        result = tools.search_restaurants_by_item(db, conversation, query="PIZZA")
+        assert "Pizza Junction" in [r["name"] for r in result["restaurants"]]
+
+    def test_no_match_returns_empty_with_a_note(self, db, conversation):
+        result = tools.search_restaurants_by_item(db, conversation, query="sushi")
+        assert result["restaurants"] == []
+        assert "note" in result
+
+    def test_empty_query_is_a_clean_error(self, db, conversation):
+        assert "error" in tools.search_restaurants_by_item(db, conversation, query="")
+
+    def test_paused_restaurant_is_excluded(self, db, conversation, biryani):
+        biryani.is_accepting_orders = False
+        db.flush()
+        result = tools.search_restaurants_by_item(db, conversation, query="biryani")
+        assert result["restaurants"] == []
+
+
 class TestGetMenu:
     def test_by_id(self, db, conversation, pizza):
         result = tools.get_menu(db, conversation, restaurant_id=pizza.id)

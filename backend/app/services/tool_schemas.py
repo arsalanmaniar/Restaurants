@@ -28,6 +28,28 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "search_restaurants_by_item",
+            "description": (
+                "Find open restaurants whose menu has an item matching a dish name, "
+                "e.g. 'biryani', 'pizza', 'chowmein'. Call this as soon as the customer "
+                "says what they want to eat, BEFORE asking them to pick a restaurant — "
+                "never guess which restaurants serve something."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The dish or food keyword the customer said, e.g. 'chicken biryani'.",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_menu",
             "description": (
                 "Get the available menu items for one restaurant. Always call this "

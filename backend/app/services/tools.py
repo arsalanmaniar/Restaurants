@@ -107,6 +107,60 @@ def list_restaurants(db: Session, conversation: Conversation, cuisine: str | Non
     }
 
 
+def search_restaurants_by_item(
+    db: Session, conversation: Conversation, query: str
+) -> dict:
+    """Cross-restaurant menu search by dish/item name.
+
+    Structured Postgres query (ILIKE substring), not a vector search — the catalog
+    is a few hundred items per restaurant at most, so a keyword match on the item
+    name is plenty and needs no new infrastructure. This is what lets the flow go
+    straight from "biryani" to "these restaurants have it" instead of "here are all
+    our restaurants, pick blind."
+    """
+    query = (query or "").strip()
+    if not query:
+        return {"error": "Give a dish or cuisine keyword to search for."}
+
+    rows = db.execute(
+        select(Restaurant, MenuItem.name)
+        .join(MenuItem, MenuItem.restaurant_id == Restaurant.id)
+        .where(
+            Restaurant.status == RestaurantStatus.ACTIVE,
+            Restaurant.is_accepting_orders.is_(True),
+            MenuItem.is_available.is_(True),
+            MenuItem.name.ilike(f"%{query}%"),
+        )
+        .order_by(Restaurant.name, MenuItem.name)
+    ).all()
+
+    matches: dict[int, dict] = {}
+    for restaurant, item_name in rows:
+        if not is_open(restaurant):
+            continue  # same "don't offer a dark kitchen" rule as list_restaurants
+        entry = matches.setdefault(
+            restaurant.id,
+            {
+                "id": restaurant.id,
+                "name": restaurant.name,
+                "cuisine": restaurant.cuisine_type,
+                "matched_items": [],
+            },
+        )
+        if len(entry["matched_items"]) < 5 and item_name not in entry["matched_items"]:
+            entry["matched_items"].append(item_name)
+
+    restaurants = list(matches.values())[:20]
+
+    if not restaurants:
+        return {
+            "restaurants": [],
+            "note": f"No open restaurant has an item matching '{query}'.",
+        }
+
+    return {"query": query, "restaurants": restaurants}
+
+
 def _resolve_restaurant(
     db: Session, restaurant_id: int | str | None, restaurant_name: str | None
 ) -> Restaurant | None:
@@ -759,6 +813,7 @@ def reorder_last(db: Session, conversation: Conversation) -> dict:
 
 TOOL_IMPLS = {
     "list_restaurants": list_restaurants,
+    "search_restaurants_by_item": search_restaurants_by_item,
     "get_menu": get_menu,
     "add_to_cart": add_to_cart,
     "clear_cart": clear_cart,
