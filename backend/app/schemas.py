@@ -435,3 +435,53 @@ class OwnerCreated(BaseModel):
 class RestaurantCreateOut(BaseModel):
     restaurant: RestaurantOut
     owner: OwnerCreated
+
+
+class RestaurantUpdate(BaseModel):
+    """Deliberately narrow: only the fields the admin's edit form asks for. Anything
+    else (status, commission, email/password, ...) belongs to a different flow and is
+    stripped by simply not being a field here — extra keys in the request body are
+    ignored by pydantic, not silently applied."""
+
+    name: str = Field(min_length=1, max_length=120)
+    phone: str = Field(min_length=1, max_length=32)
+    address: str = Field(min_length=1)
+
+
+# --------------------------------------------------------------------------- #
+# Financial reports (admin platform-wide, admin per-restaurant, restaurant self)
+# --------------------------------------------------------------------------- #
+#
+# One shared shape for all three endpoints — a restaurant's own report and the
+# admin's view of that same restaurant must never drift apart into two different
+# definitions of "revenue".
+
+
+class ReportCategoryOut(BaseModel):
+    name: str
+    revenue: Decimal
+    order_count: int
+
+
+class ReportItemOut(BaseModel):
+    name: str
+    revenue: Decimal
+    quantity_sold: int
+
+
+class ReportOut(BaseModel):
+    gross_sales: Decimal
+    cancelled_amount: Decimal
+    net_sales: Decimal
+    cash_amount: Decimal
+    online_amount: Decimal
+    order_count: int
+    customer_count: int
+    avg_order_amount: Decimal
+    # No delivery/pickup distinction exists anywhere in the schema today — every order
+    # is a delivery (see Order.delivery_address_text). Both fields are always 0 rather
+    # than guessing; see the report handoff notes for the flag on this.
+    delivery_count: int
+    pickup_count: int
+    top_categories: list[ReportCategoryOut]
+    top_items: list[ReportItemOut]

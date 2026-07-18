@@ -5,7 +5,7 @@ restaurant_id in a path or body is only ever used *together* with that scope, so
 staff at restaurant A cannot read or mutate restaurant B's rows by guessing ids.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import delete, func, select
@@ -35,12 +35,14 @@ from app.schemas import (
     OrderStatusUpdate,
     RatingOut,
     RatingSummary,
+    ReportOut,
     RestaurantOut,
     RestaurantSettingsPatch,
     WorkingHoursOut,
     WorkingHoursPeriod,
     WorkingHoursReplace,
 )
+from app.services import reports as reports_service
 from app.services.opening_hours import is_open
 
 router = APIRouter(prefix="/restaurant", tags=["restaurant"])
@@ -436,3 +438,24 @@ def today_stats(principal: CurrentStaff, db: DbSession) -> dict:
         "revenue_24h": str(row[1]),
         "active_orders": active,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Financial reports
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/reports", response_model=ReportOut)
+def my_report(
+    principal: CurrentStaff,
+    db: DbSession,
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+) -> ReportOut:
+    """Always scoped to the caller's own restaurant — never trusts a restaurant_id
+    from the request, same as every other handler in this router."""
+    try:
+        data = reports_service.build_report(db, principal.restaurant_id, start_date, end_date)
+    except reports_service.ReportRangeError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    return ReportOut(**vars(data))

@@ -1,11 +1,12 @@
 """Admin dashboard: approvals, plans, cross-restaurant views, platform revenue."""
 
+from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import select
 
 from app.core.security import verify_password
-from app.models import Restaurant, RestaurantStaff, RestaurantStatus
+from app.models import MenuItem, OrderStatus, PaymentMethod, Restaurant, RestaurantStaff, RestaurantStatus
 from app.services import tools
 
 
@@ -203,6 +204,99 @@ class TestRestaurantOnboarding:
         response = client.delete(f"/admin/restaurants/{biryani.id}", headers=pizza_headers)
         assert response.status_code == 403
 
+    def test_admin_can_edit_restaurant(self, client, admin_headers):
+        created = client.post(
+            "/admin/restaurants",
+            headers=admin_headers,
+            json=_onboarding_payload(name="Editable Kitchen", email="owner@editable.pk"),
+        ).json()
+        restaurant_id = created["restaurant"]["id"]
+
+        response = client.put(
+            f"/admin/restaurants/{restaurant_id}",
+            headers=admin_headers,
+            json={
+                "name": "Renamed Kitchen",
+                "phone": "923009998888",
+                "address": "99 Renamed Road, Lahore",
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["name"] == "Renamed Kitchen"
+        assert body["phone"] == "923009998888"
+        assert body["address"] == "99 Renamed Road, Lahore"
+
+        listed = next(
+            r
+            for r in client.get("/admin/restaurants", headers=admin_headers).json()
+            if r["id"] == restaurant_id
+        )
+        assert listed["name"] == "Renamed Kitchen"
+        assert listed["phone"] == "923009998888"
+        assert listed["address"] == "99 Renamed Road, Lahore"
+
+    def test_edit_only_touches_name_phone_address(self, db, client, admin_headers):
+        created = client.post(
+            "/admin/restaurants",
+            headers=admin_headers,
+            json=_onboarding_payload(
+                name="Untouched Fields Kitchen", email="owner@untouched.pk"
+            ),
+        ).json()
+        restaurant_id = created["restaurant"]["id"]
+
+        response = client.put(
+            f"/admin/restaurants/{restaurant_id}",
+            headers=admin_headers,
+            json={
+                "name": "Untouched Fields Kitchen Renamed",
+                "phone": "923007776666",
+                "address": "New address",
+                "status": "suspended",
+                "email": "hijacked@example.com",
+                "commission_rate": "99.00",
+                "is_accepting_orders": False,
+            },
+        )
+        assert response.status_code == 200, response.text
+
+        db.expire_all()
+        restaurant = db.get(Restaurant, restaurant_id)
+        assert restaurant.name == "Untouched Fields Kitchen Renamed"
+        assert restaurant.status.value == "active"
+        assert str(restaurant.commission_rate) == "15.00"
+        assert restaurant.is_accepting_orders is True
+
+        staff = db.scalar(
+            select(RestaurantStaff).where(RestaurantStaff.restaurant_id == restaurant_id)
+        )
+        assert staff.email == "owner@untouched.pk"
+
+    def test_edit_missing_restaurant_returns_404(self, client, admin_headers):
+        response = client.put(
+            "/admin/restaurants/999999",
+            headers=admin_headers,
+            json={"name": "Ghost", "phone": "923000000000", "address": "Nowhere"},
+        )
+        assert response.status_code == 404
+
+    def test_edit_requires_admin_auth(self, client, pizza_headers, biryani):
+        response = client.put(
+            f"/admin/restaurants/{biryani.id}",
+            headers=pizza_headers,
+            json={"name": "Hijacked", "phone": "923000000000", "address": "Nowhere"},
+        )
+        assert response.status_code == 403
+
+    def test_edit_empty_field_returns_422(self, client, admin_headers, pizza):
+        response = client.put(
+            f"/admin/restaurants/{pizza.id}",
+            headers=admin_headers,
+            json={"name": "", "phone": "923000000000", "address": "Nowhere"},
+        )
+        assert response.status_code == 422
+
 
 class TestCommission:
     def test_admin_can_override_a_restaurants_rate(self, db, client, admin_headers, pizza):
@@ -353,3 +447,214 @@ class TestRatings:
             raise AssertionError("must not be able to rate another customer's order")
         except ratings.RatingError:
             pass
+
+
+def _item(db, restaurant: Restaurant, name_substring: str) -> MenuItem:
+    return db.scalar(
+        select(MenuItem).where(
+            MenuItem.restaurant_id == restaurant.id,
+            MenuItem.name.ilike(f"%{name_substring}%"),
+        )
+    )
+
+
+class TestFinancialReports:
+    """Date-range revenue reports: /admin/reports and
+    /admin/reports/restaurants/{id}."""
+
+    def _seed_orders(self, db, make_order, pizza, biryani):
+        chicken_tikka_pizza = _item(db, pizza, "Chicken Tikka Pizza")
+        pepperoni_pizza = _item(db, pizza, "Pepperoni Pizza")
+        fajita_pizza = _item(db, pizza, "Fajita Pizza")
+        loaded_fries = _item(db, pizza, "Loaded Fries")
+        chicken_biryani = _item(db, biryani, "Chicken Biryani")
+
+        in_range = {
+            "delivered_cod": make_order(
+                pizza,
+                customer_number="923005550001",
+                items=[(chicken_tikka_pizza, 2)],
+                payment_method=PaymentMethod.COD,
+                status=OrderStatus.DELIVERED,
+                placed_on=date(2024, 1, 10),
+            ),
+            "delivered_online": make_order(
+                pizza,
+                customer_number="923005550002",
+                items=[(pepperoni_pizza, 1), (loaded_fries, 2)],
+                payment_method=PaymentMethod.JAZZCASH,
+                status=OrderStatus.DELIVERED,
+                placed_on=date(2024, 1, 15),
+            ),
+            "cancelled": make_order(
+                pizza,
+                customer_number="923005550003",
+                items=[(fajita_pizza, 1)],
+                payment_method=PaymentMethod.COD,
+                status=OrderStatus.CANCELLED,
+                placed_on=date(2024, 1, 20),
+            ),
+            "other_restaurant": make_order(
+                biryani,
+                customer_number="923005550004",
+                items=[(chicken_biryani, 3)],
+                payment_method=PaymentMethod.EASYPAISA,
+                status=OrderStatus.DELIVERED,
+                placed_on=date(2024, 1, 12),
+            ),
+        }
+        # Outside the Jan 1–31 window every test below queries — proves the date
+        # filter actually excludes it rather than just happening not to match.
+        make_order(
+            pizza,
+            customer_number="923005550005",
+            items=[(chicken_tikka_pizza, 1)],
+            status=OrderStatus.DELIVERED,
+            placed_on=date(2024, 2, 5),
+        )
+        return in_range
+
+    def test_platform_wide_happy_path(self, db, client, make_order, admin_headers, pizza, biryani):
+        self._seed_orders(db, make_order, pizza, biryani)
+
+        response = client.get(
+            "/admin/reports?start_date=2024-01-01&end_date=2024-01-31", headers=admin_headers
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+
+        assert Decimal(body["gross_sales"]) == Decimal("7790.00")
+        assert Decimal(body["cancelled_amount"]) == Decimal("1850.00")
+        assert Decimal(body["net_sales"]) == Decimal("5940.00")
+        assert Decimal(body["cash_amount"]) == Decimal("2400.00")
+        assert Decimal(body["online_amount"]) == Decimal("3540.00")
+        assert Decimal(body["cash_amount"]) + Decimal(body["online_amount"]) == Decimal(
+            body["net_sales"]
+        )
+        assert body["order_count"] == 3
+        assert body["customer_count"] == 3
+        assert Decimal(body["avg_order_amount"]) == Decimal("1980.00")
+        # No fulfilment-type column exists on Order — see the report handoff notes.
+        assert body["delivery_count"] == 0
+        assert body["pickup_count"] == 0
+
+        categories = {c["name"]: c for c in body["top_categories"]}
+        assert len(body["top_categories"]) == 3
+        assert categories["Pizza"]["revenue"] == "3550.00" or Decimal(
+            categories["Pizza"]["revenue"]
+        ) == Decimal("3550.00")
+        assert categories["Pizza"]["order_count"] == 2
+        assert Decimal(categories["Biryani"]["revenue"]) == Decimal("1350.00")
+        assert Decimal(categories["Sides"]["revenue"]) == Decimal("760.00")
+
+        items = [i["name"] for i in body["top_items"]]
+        assert items[0] == "Chicken Tikka Pizza (Medium)"
+        assert body["top_items"][0]["quantity_sold"] == 2
+        assert Decimal(body["top_items"][0]["revenue"]) == Decimal("2300.00")
+
+    def test_per_restaurant_scopes_to_one_restaurant(
+        self, db, client, make_order, admin_headers, pizza, biryani
+    ):
+        self._seed_orders(db, make_order, pizza, biryani)
+
+        response = client.get(
+            f"/admin/reports/restaurants/{pizza.id}?start_date=2024-01-01&end_date=2024-01-31",
+            headers=admin_headers,
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+
+        # Biryani's order must not leak into a pizza-scoped report.
+        assert Decimal(body["gross_sales"]) == Decimal("6360.00")
+        assert Decimal(body["net_sales"]) == Decimal("4510.00")
+        assert Decimal(body["cancelled_amount"]) == Decimal("1850.00")
+        assert body["order_count"] == 2
+        assert body["customer_count"] == 2
+        assert all(c["name"] != "Biryani" for c in body["top_categories"])
+
+    def test_empty_range_is_all_zero(self, client, admin_headers):
+        response = client.get(
+            "/admin/reports?start_date=2020-01-01&end_date=2020-01-31", headers=admin_headers
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+
+        assert Decimal(body["gross_sales"]) == Decimal("0")
+        assert Decimal(body["cancelled_amount"]) == Decimal("0")
+        assert Decimal(body["net_sales"]) == Decimal("0")
+        assert Decimal(body["cash_amount"]) == Decimal("0")
+        assert Decimal(body["online_amount"]) == Decimal("0")
+        assert Decimal(body["avg_order_amount"]) == Decimal("0")
+        assert body["order_count"] == 0
+        assert body["customer_count"] == 0
+        assert body["top_categories"] == []
+        assert body["top_items"] == []
+
+    def test_end_before_start_is_422(self, client, admin_headers):
+        response = client.get(
+            "/admin/reports?start_date=2024-02-01&end_date=2024-01-01", headers=admin_headers
+        )
+        assert response.status_code == 422
+
+    def test_range_over_366_days_is_422_with_helpful_message(self, client, admin_headers):
+        response = client.get(
+            "/admin/reports?start_date=2020-01-01&end_date=2023-01-01", headers=admin_headers
+        )
+        assert response.status_code == 422
+        assert "366" in response.json()["detail"]
+
+    def test_range_of_exactly_366_days_is_allowed(self, client, admin_headers):
+        response = client.get(
+            "/admin/reports?start_date=2020-01-01&end_date=2020-12-31", headers=admin_headers
+        )
+        assert response.status_code == 200, response.text
+
+    def test_staff_cannot_call_platform_report(self, client, pizza_headers):
+        response = client.get(
+            "/admin/reports?start_date=2024-01-01&end_date=2024-01-31", headers=pizza_headers
+        )
+        assert response.status_code == 403
+
+    def test_staff_cannot_call_per_restaurant_report(self, client, pizza_headers, biryani):
+        response = client.get(
+            f"/admin/reports/restaurants/{biryani.id}"
+            "?start_date=2024-01-01&end_date=2024-01-31",
+            headers=pizza_headers,
+        )
+        assert response.status_code == 403
+
+    def test_unknown_restaurant_is_404(self, client, admin_headers):
+        response = client.get(
+            "/admin/reports/restaurants/999999?start_date=2024-01-01&end_date=2024-01-31",
+            headers=admin_headers,
+        )
+        assert response.status_code == 404
+
+    def test_cancelled_excluded_from_net_but_included_in_cancelled_amount(
+        self, db, client, make_order, admin_headers, pizza
+    ):
+        chicken_tikka_pizza = _item(db, pizza, "Chicken Tikka Pizza")
+        delivered = make_order(
+            pizza,
+            customer_number="923005551001",
+            items=[(chicken_tikka_pizza, 1)],
+            status=OrderStatus.DELIVERED,
+            placed_on=date(2024, 3, 5),
+        )
+        cancelled = make_order(
+            pizza,
+            customer_number="923005551002",
+            items=[(chicken_tikka_pizza, 1)],
+            status=OrderStatus.CANCELLED,
+            placed_on=date(2024, 3, 6),
+        )
+
+        response = client.get(
+            "/admin/reports?start_date=2024-03-01&end_date=2024-03-31", headers=admin_headers
+        )
+        body = response.json()
+
+        assert Decimal(body["net_sales"]) == delivered.total_amount
+        assert Decimal(body["cancelled_amount"]) == cancelled.total_amount
+        assert Decimal(body["gross_sales"]) == delivered.total_amount + cancelled.total_amount
+        assert body["order_count"] == 1

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { AddRestaurantModal, type RestaurantCreated } from "@/components/add-restaurant-modal";
 import { DeleteRestaurantDialog } from "@/components/delete-restaurant-dialog";
+import { EditRestaurantModal } from "@/components/edit-restaurant-modal";
 import { RestaurantCreatedDialog } from "@/components/restaurant-created-dialog";
 import {
   Button,
@@ -35,6 +36,7 @@ export default function AdminRestaurantsPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [created, setCreated] = useState<RestaurantCreated | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<RestaurantSummary | null>(null);
+  const [editTarget, setEditTarget] = useState<RestaurantSummary | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -150,6 +152,13 @@ export default function AdminRestaurantsPage() {
     setDeleteTarget(null);
   }
 
+  function handleSaved(updated: Restaurant) {
+    setRestaurants((prev) =>
+      prev.map((r) => (r.id === updated.id ? { ...r, ...updated } : r)),
+    );
+    setEditTarget(null);
+  }
+
   const pending = restaurants.filter((r) => r.status === "pending");
   const rest = restaurants.filter((r) => r.status !== "pending");
 
@@ -176,15 +185,25 @@ export default function AdminRestaurantsPage() {
               // Reuses the order-status "needs action" gold — an unreviewed signup
               // is the restaurant-list equivalent of a pending order.
               <Card key={r.id} accent={STATUS_ACCENT.pending}>
-                <button
-                  type="button"
-                  onClick={() => setDeleteTarget(r)}
-                  aria-label={`Delete ${r.name}`}
-                  className="absolute right-3 top-3 text-xs font-medium text-cast-iron/40 hover:text-smoked-brick"
-                >
-                  Delete
-                </button>
-                <div className="flex flex-wrap items-center justify-between gap-4 pr-14">
+                <div className="absolute right-3 top-3 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setEditTarget(r)}
+                    aria-label={`Edit ${r.name}`}
+                    className="text-xs font-medium text-cast-iron/40 hover:text-curry-leaf"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDeleteTarget(r)}
+                    aria-label={`Delete ${r.name}`}
+                    className="text-xs font-medium text-cast-iron/40 hover:text-smoked-brick"
+                  >
+                    Delete
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-4 pr-24">
                   <div>
                     <p className="font-semibold text-cast-iron">{r.name}</p>
                     <p className="text-sm text-cast-iron/70">
@@ -226,15 +245,25 @@ export default function AdminRestaurantsPage() {
           <div className="space-y-3">
             {rest.map((r) => (
               <Card key={r.id} accent={ROLE_ACCENT.admin}>
-                <button
-                  type="button"
-                  onClick={() => setDeleteTarget(r)}
-                  aria-label={`Delete ${r.name}`}
-                  className="absolute right-3 top-3 text-xs font-medium text-cast-iron/40 hover:text-smoked-brick"
-                >
-                  Delete
-                </button>
-                <div className="flex flex-wrap items-start justify-between gap-4 pr-14">
+                <div className="absolute right-3 top-3 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setEditTarget(r)}
+                    aria-label={`Edit ${r.name}`}
+                    className="text-xs font-medium text-cast-iron/40 hover:text-curry-leaf"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDeleteTarget(r)}
+                    aria-label={`Delete ${r.name}`}
+                    className="text-xs font-medium text-cast-iron/40 hover:text-smoked-brick"
+                  >
+                    Delete
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-start justify-between gap-4 pr-24">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-semibold text-cast-iron">{r.name}</span>
@@ -322,6 +351,14 @@ export default function AdminRestaurantsPage() {
           restaurant={deleteTarget}
           onClose={() => setDeleteTarget(null)}
           onDeleted={handleDeleted}
+        />
+      )}
+
+      {editTarget && (
+        <EditRestaurantModal
+          restaurant={editTarget}
+          onClose={() => setEditTarget(null)}
+          onSaved={handleSaved}
         />
       )}
     </div>

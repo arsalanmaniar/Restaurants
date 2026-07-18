@@ -1,6 +1,6 @@
 """Admin dashboard API — cross-restaurant, no tenant scoping."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -34,16 +34,19 @@ from app.schemas import (
     OwnerCreated,
     RefundIn,
     RefundOut,
+    ReportOut,
     RestaurantCreate,
     RestaurantCreateOut,
     RestaurantOut,
     RestaurantPatch,
     RestaurantSummaryOut,
+    RestaurantUpdate,
     SubscriptionPlanIn,
     SubscriptionPlanOut,
     SubscriptionPlanPatch,
 )
 from app.services import refunds as refunds_service
+from app.services import reports as reports_service
 
 # The business runs in Pakistan; "today" must mean today in Karachi, not in UTC.
 PAKISTAN_TZ = ZoneInfo("Asia/Karachi")
@@ -168,6 +171,28 @@ def delete_restaurant(restaurant_id: int, admin: CurrentAdmin, db: DbSession) ->
 
     db.delete(restaurant)  # cascades to staff/categories/menu_items/working_hours
     db.commit()
+
+
+@router.put("/restaurants/{restaurant_id}", response_model=RestaurantOut)
+def edit_restaurant(
+    restaurant_id: int, payload: RestaurantUpdate, admin: CurrentAdmin, db: DbSession
+) -> Restaurant:
+    """Edit the basic profile fields (name/phone/address) from the admin restaurant
+    list. Deliberately narrow — see `RestaurantUpdate` — everything else (status,
+    commission, subscription plan, owner credentials) has its own dedicated flow and
+    is not reachable through this endpoint even if present in the request body.
+    """
+    restaurant = db.get(Restaurant, restaurant_id)
+    if restaurant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Restaurant not found")
+
+    restaurant.name = payload.name
+    restaurant.phone = payload.phone
+    restaurant.address = payload.address
+
+    db.commit()
+    db.refresh(restaurant)
+    return restaurant
 
 
 @router.patch("/restaurants/{restaurant_id}", response_model=RestaurantOut)
@@ -570,3 +595,44 @@ def platform_stats(admin: CurrentAdmin, db: DbSession) -> dict:
         "pending_approval": pending_approval,
         "total_customers": customers,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Financial reports
+# --------------------------------------------------------------------------- #
+
+
+def _build_report_response(
+    db: DbSession, restaurant_id: int | None, start_date: date, end_date: date
+) -> ReportOut:
+    try:
+        data = reports_service.build_report(db, restaurant_id, start_date, end_date)
+    except reports_service.ReportRangeError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    return ReportOut(**vars(data))
+
+
+@router.get("/reports", response_model=ReportOut)
+def platform_report(
+    admin: CurrentAdmin,
+    db: DbSession,
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+) -> ReportOut:
+    """Platform-wide revenue report across every restaurant."""
+    return _build_report_response(db, None, start_date, end_date)
+
+
+@router.get("/reports/restaurants/{restaurant_id}", response_model=ReportOut)
+def restaurant_report(
+    restaurant_id: int,
+    admin: CurrentAdmin,
+    db: DbSession,
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+) -> ReportOut:
+    """The same report, scoped to a single restaurant — what that restaurant's own
+    /restaurant/reports endpoint would show, viewed by an admin."""
+    if db.get(Restaurant, restaurant_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Restaurant not found")
+    return _build_report_response(db, restaurant_id, start_date, end_date)

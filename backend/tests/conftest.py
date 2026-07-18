@@ -13,6 +13,9 @@ things (JSONB, enum types, `ON DELETE` behaviour) that SQLite would not catch. P
 """
 
 import os
+import secrets
+from datetime import date as date_
+from datetime import datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -34,6 +37,10 @@ from app.models import (
     Customer,
     MenuItem,
     Order,
+    OrderItem,
+    OrderStatus,
+    PaymentMethod,
+    PaymentStatus,
     Restaurant,
     RestaurantStaff,
     RestaurantWorkingHours,
@@ -41,6 +48,7 @@ from app.models import (
 from app.seed import seed
 from app.services import conversations as convo
 from app.services import tools
+from app.services.opening_hours import PAKISTAN_TZ
 
 
 def pytest_configure(config):
@@ -255,3 +263,73 @@ def delivered_order(db, client, cod_order, pizza_headers) -> Order:
 @pytest.fixture
 def money():
     return Decimal
+
+
+@pytest.fixture
+def make_order(db):
+    """Factory for building an Order + OrderItems directly, bypassing the AI
+    ordering flow, so report tests can control placed_at / status / payment_method /
+    items precisely instead of driving a conversation for every seeded order.
+
+    `placed_on` is a calendar date interpreted in Asia/Karachi (matching the report
+    endpoints), not UTC — a report test asking for "yesterday" means yesterday in
+    Karachi.
+    """
+
+    def _make_order(
+        restaurant: Restaurant,
+        *,
+        customer_number: str,
+        items: list[tuple[MenuItem, int]],
+        payment_method: PaymentMethod = PaymentMethod.COD,
+        status: OrderStatus = OrderStatus.DELIVERED,
+        placed_on: date_,
+        commission_rate: Decimal | None = None,
+    ) -> Order:
+        customer = convo.get_or_create_customer(db, customer_number)
+
+        subtotal = sum((item.price * qty for item, qty in items), Decimal("0.00"))
+        delivery_fee = restaurant.delivery_fee
+        total_amount = subtotal + delivery_fee
+        rate = commission_rate if commission_rate is not None else restaurant.commission_rate
+        commission_amount = (subtotal * rate / Decimal("100")).quantize(Decimal("0.01"))
+
+        placed_at = datetime.combine(placed_on, time(12, 0), tzinfo=PAKISTAN_TZ).astimezone(
+            timezone.utc
+        )
+
+        order = Order(
+            order_number=f"AB-T{secrets.token_hex(3).upper()}",
+            customer_id=customer.id,
+            restaurant_id=restaurant.id,
+            delivery_address_text="123 Test Street",
+            status=status,
+            payment_method=payment_method,
+            payment_status=(
+                PaymentStatus.UNPAID
+                if status == OrderStatus.AWAITING_PAYMENT
+                else PaymentStatus.PAID
+            ),
+            subtotal=subtotal,
+            delivery_fee=delivery_fee,
+            discount_amount=Decimal("0.00"),
+            total_amount=total_amount,
+            commission_rate=rate,
+            commission_amount=commission_amount,
+            placed_at=placed_at,
+        )
+        order.items = [
+            OrderItem(
+                menu_item_id=item.id,
+                item_name=item.name,
+                price_at_order=item.price,
+                quantity=qty,
+                line_total=item.price * qty,
+            )
+            for item, qty in items
+        ]
+        db.add(order)
+        db.flush()
+        return order
+
+    return _make_order

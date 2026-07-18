@@ -236,6 +236,35 @@ export interface Coupon {
   created_at: string;
 }
 
+export interface ReportCategory {
+  name: string;
+  revenue: string;
+  order_count: number;
+}
+
+export interface ReportItem {
+  name: string;
+  revenue: string;
+  quantity_sold: number;
+}
+
+export interface Report {
+  gross_sales: string;
+  cancelled_amount: string;
+  net_sales: string;
+  cash_amount: string;
+  online_amount: string;
+  order_count: number;
+  customer_count: number;
+  avg_order_amount: string;
+  // No delivery-vs-pickup column exists on the order model — every order is a
+  // delivery today, so both are always 0. See the backend report notes.
+  delivery_count: number;
+  pickup_count: number;
+  top_categories: ReportCategory[];
+  top_items: ReportItem[];
+}
+
 export const STATUS_LABELS: Record<OrderStatus, string> = {
   awaiting_payment: "Awaiting payment",
   pending: "New",
