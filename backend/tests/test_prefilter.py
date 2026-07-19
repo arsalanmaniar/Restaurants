@@ -203,7 +203,7 @@ class TestHandleIncomingShortCircuits:
     ):
         """A spammer sending 100 messages should get 'please slow down' ONCE,
         not 100 times — otherwise the bot mirrors the spam back at itself and
-        burns UltraMsg quota."""
+        burns Wassender quota."""
         from app.services import conversations as convo
 
         for _ in range(prefilter.MAX_MESSAGES_PER_MINUTE + 1):

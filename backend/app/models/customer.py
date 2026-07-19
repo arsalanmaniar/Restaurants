@@ -9,7 +9,7 @@ class Customer(Base, TimestampMixin):
     __table_args__ = (UniqueConstraint("whatsapp_number", name="uq_customers_whatsapp_number"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    # Stored E.164 without the '+', matching UltraMsg's format (e.g. 923001234567).
+    # Stored E.164 without the '+', matching Wassender's format (e.g. 923001234567).
     whatsapp_number: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     name: Mapped[str | None] = mapped_column(String(120))
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

@@ -192,11 +192,7 @@ class TestNoArgToolCalls:
 
 class TestFailureHandling:
     def test_groq_failure_produces_a_safe_reply(self, db, conversation, monkeypatch):
-        # Named "groq" for history; the LLM client now goes through the openai
-        # package pointed at OpenRouter, and any provider raises OpenAIError on
-        # transport failures. The behaviour asserted (fallback reply, no crash)
-        # is provider-independent.
-        from openai import OpenAIError
+        from groq import GroqError
 
         # handle_incoming_message rolls back when Groq fails. Commit the conversation
         # first so the rollback doesn't discard the fixture's own rows — in production the
@@ -205,7 +201,7 @@ class TestFailureHandling:
 
         class Exploding:
             def create(self, **kwargs):
-                raise OpenAIError("service unavailable")
+                raise GroqError("service unavailable")
 
         class Client:
             chat = types.SimpleNamespace(completions=Exploding())

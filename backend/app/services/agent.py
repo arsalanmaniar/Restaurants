@@ -17,7 +17,7 @@ import json
 import logging
 from decimal import Decimal
 
-from openai import BadRequestError, OpenAI, OpenAIError
+from groq import BadRequestError, Groq, GroqError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -65,20 +65,34 @@ they want, which restaurant, which item, whether to confirm, and so on. A reply 
 just states a fact and stops leaves the customer unsure what to say next.
 
 The conversation flow, in order:
-1. Greeting (first message in a chat): welcome them warmly, ask roughly which area \
-you're delivering to (e.g. "Karachi, Saddar") 📍, and ask what they feel like eating. \
-These two questions can go in the same message. This area is just for narrowing down \
-restaurants for now — it is NOT the exact delivery address, so still ask for the full \
-address separately later, before place_order.
+1. Greeting (any bare hello like "hi", "hey", "assalamualaikum", "salaam" — usually \
+but not always the first message). Reply in exactly this shape (translate the wording \
+into the customer's language as usual):
+
+Welcome to AbhiAya! 🍴 Which area should we deliver to, and what would you like to eat today?
+
+Do NOT call any tools on a greeting turn — no search_restaurants_by_item, no \
+list_restaurants, no get_menu. Just the greeting and those two questions. The \
+area is only for narrowing restaurants; still ask for the full delivery address \
+later, before place_order.
 2. Once they name a dish or cuisine (e.g. "biryani", "pizza"), call \
 search_restaurants_by_item with that word — never guess or list restaurants from \
-memory. Present the restaurants it returns as a plain numbered list, one per line, \
-like:
+memory. Present whatever list a tool returns in this exact shape: a header line, \
+then a plain numbered list, one per line, then a blank line, then a question that \
+invites them to pick — ending in 🍴. The shape below is fixed; translate only the \
+wording into the customer's language as usual (Roman Urdu included):
+Here are restaurants serving biryani:
 1. Karachi Biryani House
-2. Wok & Roll
-Then ask which one they'd like. If it finds nothing, call list_restaurants (with a \
-cuisine guess, or with no filter at all) and offer those instead — never tell the \
-customer "we have nothing" without trying that fallback.
+2. Pizza Junction
+3. Wok & Roll
+
+Which would you like to order from? 🍴
+Name the searched dish or cuisine in the header ("Here are restaurants serving X:") \
+when the list came from search_restaurants_by_item. If you had to fall back to \
+list_restaurants with no filter, use a plain header instead ("Here are available \
+restaurants:"). If search_restaurants_by_item finds nothing, call list_restaurants \
+(with a cuisine guess, or with no filter at all) and offer those instead — never tell \
+the customer "we have nothing" without trying that fallback.
 3. Once they pick a restaurant (by number, name, or "show me the menu"), call get_menu \
 for that restaurant and show the items with prices as plain lines (item — Rs. price), \
 grouped naturally by category if that reads better, no markdown headers or dashes. Ask \
@@ -139,14 +153,11 @@ you have not is a lie to the customer. Report the order's real status and stop t
 """
 
 
-def _client() -> OpenAI:
-    # OpenRouter is OpenAI-API compatible, so the standard OpenAI SDK works
-    # against it by just overriding base_url. Swap this back to Groq(...) to
-    # return to the Groq provider.
-    return OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=settings.openrouter_api_key,
-    )
+def _client() -> Groq:
+    # Groq's SDK is a fork of the OpenAI SDK — same chat.completions.create
+    # interface. To switch back to an OpenAI-compatible endpoint (OpenRouter,
+    # Gemini's /v1beta/openai/, etc.), swap this for OpenAI(base_url=..., api_key=...).
+    return Groq(api_key=settings.groq_api_key)
 
 
 def _cart_summary(conversation: Conversation) -> str:
@@ -281,9 +292,9 @@ def _run_tool(db: Session, conversation: Conversation, name: str, raw_args: str)
         return {"error": f"{name} failed internally: {exc}"}
 
 
-def _complete(client: OpenAI, messages: list[dict], *, use_tools: bool, force_tool: bool = False):
+def _complete(client: Groq, messages: list[dict], *, use_tools: bool, force_tool: bool = False):
     kwargs = {
-        "model": settings.openrouter_model,
+        "model": settings.groq_model,
         "messages": messages,
         "temperature": 0.2,
         "max_tokens": 800,
@@ -356,7 +367,7 @@ def _safe_text(text: str | None) -> str:
     return text or ""
 
 
-def _force_text_reply(client: OpenAI, messages: list[dict]) -> str:
+def _force_text_reply(client: Groq, messages: list[dict]) -> str:
     """Ask for prose with tools switched off.
 
     Needed in two places, both of which produced silent failures in testing: the
@@ -566,7 +577,7 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
     try:
         reply, trace = generate_reply(db, conversation)
         db.commit()
-    except OpenAIError:
+    except GroqError:
         db.rollback()
         logger.exception("LLM call failed for conversation %s", conversation.id)
         reply, trace = FALLBACK_REPLY, []

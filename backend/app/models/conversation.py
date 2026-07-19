@@ -59,7 +59,7 @@ class MessageLog(Base):
         Enum(MessageDirection, name="message_direction"), nullable=False
     )
     content: Mapped[str | None] = mapped_column(Text)
-    # UltraMsg's own message id — used to drop duplicate webhook deliveries.
+    # Wassender's own message id — used to drop duplicate webhook deliveries.
     provider_message_id: Mapped[str | None] = mapped_column(String(128), index=True)
     # Raw provider payload / tool-call trace, kept for debugging the AI.
     meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB)

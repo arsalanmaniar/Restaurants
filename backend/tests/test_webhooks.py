@@ -1,26 +1,47 @@
-"""The UltraMsg webhook.
+"""The Wassender webhook.
 
 This endpoint is exposed to the public internet and every message it accepts costs money
 (a Groq call) and writes to the database. The guards here are what stop it being abused,
 and what stop the bot talking to itself.
 """
 
+import copy
+
 import pytest
 
 from app.core.config import settings
 
-WEBHOOK = "/webhooks/ultramsg"
+WEBHOOK = "/webhooks/wassender"
 
+# Real Wassender shape (verified against a live delivery): message text and id
+# live under `data.messages.*`, and sender/fromMe under `data.messages.key.*`.
 INBOUND = {
-    "event_type": "message_received",
+    "event": "messages.received",
     "data": {
-        "id": "true_923001234567@c.us_ABC",
-        "from": "923001234567@c.us",
-        "body": "hello",
-        "type": "chat",
-        "fromMe": False,
+        "messages": {
+            "id": "3AFE6F540BFF485F65C9",
+            "messageBody": "hello",
+            "key": {
+                "id": "3AFE6F540BFF485F65C9",
+                "cleanedSenderPn": "923001234567",
+                "fromMe": False,
+            },
+        },
     },
 }
+
+
+def _with(**overrides) -> dict:
+    """Deep-copy INBOUND and apply `data.<key>=value` or `data.messages.key.<key>=value`
+    style overrides via dotted-path keys, so tests stay readable."""
+    payload = copy.deepcopy(INBOUND)
+    for dotted, value in overrides.items():
+        node = payload
+        parts = dotted.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = value
+    return payload
 
 
 @pytest.fixture(autouse=True)
@@ -48,24 +69,24 @@ def no_ai(monkeypatch):
 def _hermetic_webhook_secret(monkeypatch):
     """Baseline: clear the webhook secret so posts without ?secret= are accepted.
     Tests that specifically exercise the secret gate re-set it via monkeypatch."""
-    monkeypatch.setattr(settings, "ultramsg_webhook_secret", "")
+    monkeypatch.setattr(settings, "wassender_webhook_secret", "")
 
 
 class TestSecret:
     def test_wrong_secret_is_rejected(self, client, monkeypatch):
-        monkeypatch.setattr(settings, "ultramsg_webhook_secret", "s3cret")
+        monkeypatch.setattr(settings, "wassender_webhook_secret", "s3cret")
         response = client.post(f"{WEBHOOK}?secret=wrong", json=INBOUND)
         assert response.status_code == 403
 
     def test_correct_secret_is_accepted(self, client, monkeypatch):
-        monkeypatch.setattr(settings, "ultramsg_webhook_secret", "s3cret")
+        monkeypatch.setattr(settings, "wassender_webhook_secret", "s3cret")
         response = client.post(f"{WEBHOOK}?secret=s3cret", json=INBOUND)
         assert response.status_code == 200
 
     def test_missing_secret_in_production_refuses_to_serve(self, client, monkeypatch):
         """An unset secret used to mean 'let everyone in' — a public endpoint that spends
         money on Groq calls and writes to our database."""
-        monkeypatch.setattr(settings, "ultramsg_webhook_secret", "")
+        monkeypatch.setattr(settings, "wassender_webhook_secret", "")
         monkeypatch.setattr(settings, "debug", False)
 
         response = client.post(WEBHOOK, json=INBOUND)
@@ -74,36 +95,42 @@ class TestSecret:
 
 class TestMessageFiltering:
     def test_own_messages_are_ignored(self, client, no_ai):
-        """UltraMsg echoes our OWN outbound messages back. Replying to them would make
+        """Wassender echoes our OWN outbound messages back. Replying to them would make
         the bot talk to itself forever."""
-        payload = {**INBOUND, "data": {**INBOUND["data"], "fromMe": True}}
+        payload = _with(**{"data.messages.key.fromMe": True})
         response = client.post(WEBHOOK, json=payload)
 
         assert response.json()["reason"] == "own message"
         assert no_ai == []
 
     def test_non_message_events_are_ignored(self, client, no_ai):
-        response = client.post(WEBHOOK, json={"event_type": "message_ack", "data": {}})
+        response = client.post(WEBHOOK, json={"event": "messages.ack"})
         assert response.json()["status"] == "ignored"
         assert no_ai == []
 
-    def test_non_text_messages_get_a_polite_reply(self, client, no_ai, monkeypatch):
+    def test_non_text_messages_are_ignored_silently(self, client, no_ai, monkeypatch):
+        """Wassender's real payload shape doesn't expose a message-type field we've
+        confirmed, so we no longer send a "text only" reply. Media messages simply
+        arrive without a messageBody and drop through the empty-body guard."""
         sent = []
         monkeypatch.setattr("app.api.webhooks.send_text", lambda to, body: sent.append(body))
 
-        payload = {**INBOUND, "data": {**INBOUND["data"], "type": "image"}}
+        payload = _with()  # inherits INBOUND
+        payload["data"]["messages"].pop("messageBody", None)  # media-shaped: no body
+
         response = client.post(WEBHOOK, json=payload)
 
-        assert "unsupported type" in response.json()["reason"]
+        assert response.json()["status"] == "ignored"
         assert no_ai == []
+        assert sent == [], "no outbound reply should be sent for media messages"
 
     def test_empty_body_is_ignored(self, client, no_ai):
-        payload = {**INBOUND, "data": {**INBOUND["data"], "body": "   "}}
+        payload = _with(**{"data.messages.messageBody": "   "})
         assert client.post(WEBHOOK, json=payload).json()["status"] == "ignored"
         assert no_ai == []
 
     def test_malformed_json_does_not_trigger_a_retry_storm(self, client):
-        """A 4xx would make UltraMsg retry a payload that will never parse."""
+        """A 4xx would make Wassender retry a payload that will never parse."""
         response = client.post(WEBHOOK, content=b"not json{{{")
         assert response.status_code == 200
         assert response.json()["status"] == "ignored"
@@ -120,13 +147,13 @@ class TestMessageProcessing:
         token bill."""
         from app.api.webhooks import MAX_INBOUND_CHARS
 
-        payload = {**INBOUND, "data": {**INBOUND["data"], "body": "x" * 50_000}}
+        payload = _with(**{"data.messages.messageBody": "x" * 50_000})
         client.post(WEBHOOK, json=payload)
 
         assert len(no_ai[0]) == MAX_INBOUND_CHARS
 
     def test_duplicate_delivery_is_processed_once(self, client, no_ai):
-        """UltraMsg retries. Without de-duplication the AI runs twice and can place the
+        """Wassender retries. Without de-duplication the AI runs twice and can place the
         same order twice."""
         client.post(WEBHOOK, json=INBOUND)
         client.post(WEBHOOK, json=INBOUND)   # same provider message id

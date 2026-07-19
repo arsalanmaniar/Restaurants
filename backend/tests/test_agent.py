@@ -107,7 +107,8 @@ class TestNewOrderingFlow:
                         content=(
                             "Yeh restaurants biryani serve karte hain:\n"
                             "1. Karachi Biryani House\n"
-                            "Which one would you like?"
+                            "\n"
+                            "Konsa pasand karain gay? 🍴"
                         )
                     )
                 ),

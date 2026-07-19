@@ -55,7 +55,7 @@ def _is_stale(conversation: Conversation) -> bool:
 
 
 def already_processed(db: Session, provider_message_id: str) -> bool:
-    """UltraMsg retries webhook deliveries; without this, a retry re-runs the AI
+    """Wassender retries webhook deliveries; without this, a retry re-runs the AI
     and can place the same order twice."""
     return (
         db.scalar(

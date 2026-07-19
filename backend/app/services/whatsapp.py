@@ -1,4 +1,4 @@
-"""UltraMsg outbound client.
+"""Wassender outbound client.
 
 Deliberately thin and provider-shaped: `send_text` is the only thing the rest of
 the app calls. When we migrate to Meta's official Cloud API (V1→V2 in the plan),
@@ -6,7 +6,7 @@ this module is the only thing that changes — with one caveat worth remembering
 
 Meta only permits free-form messages within 24h of the customer's last inbound
 message. Anything outside that window (late order-status updates, broadcasts)
-needs a pre-approved template. UltraMsg has no such restriction, so nothing here
+needs a pre-approved template. Wassender has no such restriction, so nothing here
 enforces it today; `send_text` is where that check will have to live.
 
 Sync on purpose: the AI engine runs in a background thread, and FastAPI runs sync
@@ -21,7 +21,7 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-ULTRAMSG_BASE = "https://api.ultramsg.com"
+WASSENDER_SEND_URL = "https://api.wasenderapi.com/api/send-message"
 
 # WhatsApp hard-caps message bodies; keep well under it.
 MAX_BODY_CHARS = 4000
@@ -32,7 +32,7 @@ class WhatsAppError(Exception):
 
 
 def _normalize_number(number: str) -> str:
-    """UltraMsg wants a bare international number, no '+' and no separators."""
+    """Strip formatting to just digits — the caller adds any prefix (e.g. '+' for E.164)."""
     cleaned = "".join(ch for ch in number if ch.isdigit())
     if not cleaned:
         raise WhatsAppError(f"unusable WhatsApp number: {number!r}")
@@ -40,26 +40,39 @@ def _normalize_number(number: str) -> str:
 
 
 def send_text(to: str, body: str) -> dict:
-    if not settings.ultramsg_instance_id or not settings.ultramsg_token:
+    if not settings.wassender_api_key:
         # Keeps local dev and tests runnable without live credentials.
-        logger.warning("UltraMsg not configured; would send to %s: %s", to, body)
+        logger.warning("Wassender not configured; would send to %s: %s", to, body)
         return {"sent": False, "reason": "not_configured"}
 
-    url = f"{ULTRAMSG_BASE}/{settings.ultramsg_instance_id}/messages/chat"
+    headers = {"Authorization": f"Bearer {settings.wassender_api_key}"}
+    # Wassender expects E.164 format with a leading '+'.
+    phone = _normalize_number(to)
+    if not phone.startswith("+"):
+        phone = f"+{phone}"
     payload = {
-        "token": settings.ultramsg_token,
-        "to": _normalize_number(to),
-        "body": body[:MAX_BODY_CHARS],
+        "to": phone,
+        "text": body[:MAX_BODY_CHARS],
     }
 
+    logger.info(f"Wassender request body: {payload}")
+
     try:
-        response = httpx.post(url, data=payload, timeout=20.0)
+        response = httpx.post(WASSENDER_SEND_URL, json=payload, headers=headers, timeout=20.0)
     except httpx.RequestError as exc:
-        logger.error("UltraMsg request failed: %s", exc)
+        logger.error("Wassender request failed: %s", exc)
         raise WhatsAppError(str(exc)) from exc
 
-    if response.status_code >= 400:
-        logger.error("UltraMsg send failed (%s): %s", response.status_code, response.text)
-        raise WhatsAppError(f"UltraMsg returned {response.status_code}: {response.text}")
+    # A 200 from Wassender does not guarantee the message reached WhatsApp — their
+    # API can queue-then-fail. Log status + raw body every time so we see
+    # 'success: false' / queued-status / HTML error pages hidden behind a 200.
+    logger.info(f"Wassender response status: {response.status_code}")
+    logger.info(f"Wassender response body: {response.text}")
 
-    return response.json()
+    if response.status_code >= 400:
+        raise WhatsAppError(f"Wassender returned {response.status_code}: {response.text}")
+
+    try:
+        return response.json()
+    except Exception:
+        return {}

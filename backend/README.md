@@ -25,7 +25,7 @@ work them through a dashboard.
 ## Endpoints
 
 - `GET /health` — liveness check
-- `POST /webhooks/ultramsg?secret=<ULTRAMSG_WEBHOOK_SECRET>` — UltraMsg inbound
+- `POST /webhooks/wassender?secret=<WASSENDER_WEBHOOK_SECRET>` — Wassender inbound
 - `/auth/*`, `/admin/*`, `/restaurant/*` — dashboard APIs
 
 ## Required secrets (set in HF Spaces Settings > Variables and secrets)
@@ -35,9 +35,9 @@ work them through a dashboard.
 | `DATABASE_URL` | Neon PostgreSQL connection string |
 | `JWT_SECRET` | Random 32+ character string for JWT signing |
 | `GROQ_API_KEY` | Groq API key from console.groq.com |
-| `ULTRAMSG_INSTANCE_ID` | UltraMsg instance ID |
-| `ULTRAMSG_TOKEN` | UltraMsg API token |
-| `ULTRAMSG_WEBHOOK_SECRET` | Shared secret appended to the webhook URL |
+| `WASSENDER_API_KEY` | Wassender API key (Bearer token) |
+| `WASSENDER_INSTANCE_ID` | Wassender instance ID |
+| `WASSENDER_WEBHOOK_SECRET` | Shared secret appended to the webhook URL |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated Vercel frontend URL(s) |
 | `PUBLIC_BASE_URL` | This space's public URL (https://<user>-<space>.hf.space) |
 

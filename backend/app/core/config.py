@@ -21,12 +21,12 @@ class Settings(BaseSettings):
     # OpenRouter (OpenAI-API compatible). Kept alongside groq_* so switchback is
     # trivial — see app/services/agent.py for which one is actually wired up.
     openrouter_api_key: str = ""
-    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
+    openrouter_model: str = "mistralai/mistral-7b-instruct:free"
 
-    ultramsg_instance_id: str = ""
-    ultramsg_token: str = ""
+    wassender_api_key: str = ""
+    wassender_instance_id: str = ""
     # Shared secret we append to the webhook URL so we can reject unsolicited calls.
-    ultramsg_webhook_secret: str = ""
+    wassender_webhook_secret: str = ""
 
     jwt_secret: str = _JWT_SECRET_PLACEHOLDER
     jwt_algorithm: str = "HS256"
