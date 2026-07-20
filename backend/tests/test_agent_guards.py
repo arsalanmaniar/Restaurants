@@ -216,6 +216,75 @@ class TestFailureHandling:
         assert sent == [agent.FALLBACK_REPLY], "the customer must not be left in silence"
 
 
+class TestFakeLinkDetector:
+    """conv 690 row #653: after a COD order was placed, customer asked for online
+    payment; the model narrated "link bhej diya gaya hai" without ever calling
+    place_order or including a URL. The post-gen guard must catch this and
+    replace the reply with a corrective fallback."""
+
+    def test_fake_link_claim_without_url_gets_replaced(
+        self, db, conversation, scripted_model
+    ):
+        # Model produces text claiming a link was sent — no tool call, no URL.
+        scripted_model(
+            [
+                completion(
+                    message(
+                        content=(
+                            "Aapko payment link bhej diya gaya hai, aap online "
+                            "payment kar sakte hain. 🚚"
+                        )
+                    )
+                )
+            ]
+        )
+        sent = []
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(agent, "send_text", lambda to, body: sent.append(body))
+        try:
+            agent.handle_incoming_message(db, conversation, "online payment karni h")
+        finally:
+            monkeypatch.undo()
+
+        assert len(sent) == 1
+        delivered = sent[0]
+        assert "link bhej" not in delivered.lower(), (
+            f"the fake link claim must be suppressed, but customer got: {delivered!r}"
+        )
+        assert "Cash on Delivery" in delivered
+        assert "naya order" in delivered.lower() or "new order" in delivered.lower()
+
+    def test_real_place_order_link_passes_through(
+        self, db, conversation, scripted_model
+    ):
+        """When place_order legitimately returned a payment_link (real prepaid
+        order flow), a reply that includes the URL must NOT be suppressed."""
+        # Simulate: model reply mentions "payment link" AND includes an https URL,
+        # and the trace shows a place_order with a payment_link field. Since we
+        # can't easily drive a real place_order in this stub, poke the guard
+        # helper directly.
+        trace = [
+            {
+                "tool": "place_order",
+                "args": "{}",
+                "result": {
+                    "order_number": "AB-XXXXXX",
+                    "payment_link": "https://example.test/pay/abc",
+                },
+            }
+        ]
+        reply = "Payment link: https://example.test/pay/abc — tap to pay."
+        assert not agent._claims_fake_link(reply, trace), (
+            "a real link + real trace must not be treated as a fake claim"
+        )
+
+    def test_reply_with_no_link_talk_is_not_flagged(self, db, conversation):
+        """A regular reply that never mentions payment links must pass through."""
+        trace: list[dict] = []
+        reply = "Aapka order confirm kar du? Total: Rs. 500. Haan ya nahi?"
+        assert not agent._claims_fake_link(reply, trace)
+
+
 class TestLoopDetection:
     """A read-only tool returning the same result twice in one turn is a sign the
     model is confused (e.g. list_restaurants returns 1 dead-end restaurant and it

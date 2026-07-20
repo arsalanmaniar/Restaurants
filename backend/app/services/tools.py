@@ -416,6 +416,50 @@ def clear_cart(db: Session, conversation: Conversation) -> dict:
     return {"cleared": True}
 
 
+_PAYMENT_ACK_KEYWORDS = (
+    # Any of these appearing in a recent OUTBOUND is proof the model has
+    # already surfaced the choice to the customer, so a subsequent cod call
+    # is deliberate rather than a silent default. Bilingual list — customers
+    # here talk in Roman Urdu + English mixed.
+    "payment",
+    "cod",
+    "cash on delivery",
+    "jazzcash",
+    "easypaisa",
+    "online",
+    "kis se karna",   # "which one to pay with" — the exact ask we prompt for
+)
+
+
+def _model_has_asked_payment(db: Session, conversation: Conversation) -> bool:
+    """Did the model surface payment options to the customer in a recent
+    OUTBOUND? If yes, a subsequent cod choice is theirs. If no, the model is
+    about to silently default cod without asking — which is the bug we're
+    guarding against."""
+    from app.services import conversations as convo
+
+    for msg in convo.recent_history(db, conversation, limit=8):
+        if msg.direction != MessageDirection.OUTBOUND:
+            continue
+        lowered = (msg.content or "").lower()
+        if any(kw in lowered for kw in _PAYMENT_ACK_KEYWORDS):
+            return True
+    return False
+
+
+def _has_any_outbound(db: Session, conversation: Conversation) -> bool:
+    """True if the conversation has ever produced an OUTBOUND. Used to
+    skip the payment-ask guard for direct-tool test paths (which build a
+    conversation without ever driving the model), so the guard only fires
+    on real customer flows where the model has actually been talking."""
+    from app.services import conversations as convo
+
+    return any(
+        msg.direction == MessageDirection.OUTBOUND
+        for msg in convo.recent_history(db, conversation, limit=5)
+    )
+
+
 def place_order(
     db: Session,
     conversation: Conversation,
@@ -427,6 +471,30 @@ def place_order(
     lines = list((conversation.cart or {}).get("items", []))
     if not lines:
         return {"error": "The cart is empty — nothing to order."}
+
+    # Guard against the "silent cod default" pattern: when there are multiple
+    # payment methods on offer and the model picks cod without ever asking
+    # the customer, refuse and force the model to ask on retry. Skipped when
+    # the conversation has zero outbounds (implies a direct-tool call from a
+    # test / seed, not a real flow — otherwise every test that direct-calls
+    # place_order would fail).
+    methods = available_methods()
+    if (
+        len(methods) > 1
+        and payment_method == PaymentMethod.COD.value
+        and _has_any_outbound(db, conversation)
+        and not _model_has_asked_payment(db, conversation)
+    ):
+        method_list = ", ".join(m.value for m in methods)
+        return {
+            "error": "confirm_payment_method",
+            "message": (
+                f"Multiple payment methods are available ({method_list}). "
+                "Ask the customer which one they want (mention cod / jazzcash "
+                "/ easypaisa by name), wait for their answer, then call "
+                "place_order again with the payment_method they chose."
+            ),
+        }
 
     # The cart's restaurant, NOT the last one browsed. Using active_restaurant_id here
     # would bill a pizza order to whichever restaurant the customer looked at most

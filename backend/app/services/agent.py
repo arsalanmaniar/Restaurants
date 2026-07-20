@@ -52,6 +52,59 @@ FALLBACK_REPLY = (
     "or type 'help' and someone will get back to you."
 )
 
+# Substrings that indicate the model is claiming a payment link was sent or
+# is about to be. If any of these appear in a reply AND no real link exists,
+# we replace the reply — the model is hallucinating a completed action.
+FAKE_LINK_PATTERNS = (
+    "payment link",
+    "payment ka link",
+    "link bhej",
+    "link sent",
+    "link has been sent",
+    "link bhejta",
+    "link mil jayega",
+    "link mil jaega",
+)
+
+# What we say instead when we suppress a fake-link claim. Roman Urdu because
+# the vast majority of customers hitting this path wrote in Roman Urdu (the
+# COD → "switch to online" pattern the fallback exists to catch).
+FAKE_LINK_REPLACEMENT = (
+    "Sorry, aapka order pehle hi Cash on Delivery pe place ho chuka hai — "
+    "iske liye online payment link add nahi kar sakte. Agar aap online pay "
+    "karna chahein, naya order online payment ke sath place karna hoga. "
+    "Kya wo karna chahein? 🍴"
+)
+
+
+def _has_real_payment_link(trace: list[dict]) -> bool:
+    """A trace entry proves a payment link exists if place_order returned
+    successfully AND its result includes a `payment_link` field. Any other
+    trace shape means there's no real link to send."""
+    for step in trace:
+        if step.get("tool") != "place_order":
+            continue
+        result = step.get("result") or {}
+        if isinstance(result, dict) and result.get("payment_link"):
+            return True
+    return False
+
+
+def _claims_fake_link(reply: str, trace: list[dict]) -> bool:
+    """The reply says a payment link is sent/coming, but there's no real one.
+    This is the "model narrated an action it never took" pattern (conv 690,
+    row #653). Excludes the case where the reply legitimately contains a
+    payment_link from a real place_order call this turn."""
+    if not reply:
+        return False
+    lowered = reply.lower()
+    if not any(pat in lowered for pat in FAKE_LINK_PATTERNS):
+        return False
+    if "http://" in lowered or "https://" in lowered:
+        # There IS a URL — presumably the real place_order link. Not a fake.
+        return False
+    return not _has_real_payment_link(trace)
+
 SYSTEM_PROMPT = """You are AbhiAya, a friendly WhatsApp assistant that takes food \
 orders for a network of restaurants in Pakistan.
 
@@ -166,6 +219,15 @@ chose. Coupons pass through as coupon_code; never compute discounts yourself.
 asks about an order they already placed ("where is my order?"), use get_order_status \
 — NEVER add_to_cart or place_order again. Orders in the system message above are \
 already done; never rebuild them.
+- NEVER claim a payment link has been sent, is coming, or is on its way. Either \
+place_order returned a payment_link field in this turn's tool result (in which case \
+you MUST include the exact URL verbatim in your reply), OR you have no link — say so \
+honestly. If the customer asks to switch payment method AFTER an order was already \
+placed as cod, tell them the order is committed to cash-on-delivery and cannot be \
+switched — do not fake a link, do not promise one is coming, do not offer to send one.
+- If the customer says "online" or "online payment" without picking a specific \
+gateway, ask "JazzCash ya EasyPaisa?" — do not assume. Both go through place_order \
+with the specific payment_method value ("jazzcash" or "easypaisa").
 
 Cart discipline:
 - If the customer is only ASKING about the cart ("how much?", "what did I order?"), \
@@ -677,6 +739,18 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
             reply[:120],
         )
         reply = FALLBACK_REPLY
+
+    # Fake-completion gate. Conv 690 row #653: after a COD order was placed,
+    # the customer asked for online payment; the model said "link bhej diya
+    # gaya hai" without calling place_order or including a URL. Replace such
+    # replies with a corrective fallback so the customer never sees a lie.
+    elif _claims_fake_link(reply, trace):
+        logger.warning(
+            "conversation %s: suppressed fake payment-link claim in outbound reply: %r",
+            conversation.id,
+            reply[:200],
+        )
+        reply = FAKE_LINK_REPLACEMENT
 
     if not reply:
         reply = FALLBACK_REPLY
