@@ -115,11 +115,18 @@ class TestPayLink:
         token = link.rsplit("/", 1)[-1]
         assert read_pay_token(token) == order.payments[0].id
 
-    def test_page_auto_submits_to_the_gateway(self, client, prepaid_order):
+    def test_page_shows_demo_checkout_for_fake_provider(self, client, prepaid_order):
+        """FAKE-provider payments render a demo checkout page (two buttons —
+        simulate success or failure) instead of auto-submitting to the fake
+        gateway's unreachable domain. Real providers still auto-submit; that
+        path is exercised in unit tests of build_checkout on each provider."""
         _, link = prepaid_order
         response = client.get(f"/pay/{link.rsplit('/', 1)[-1]}")
         assert response.status_code == 200
-        assert "fake-gateway.invalid" in response.text
+        # Demo-page markers — the checkout page, not the auto-submit form.
+        assert "Demo checkout" in response.text
+        assert "Simulate successful payment" in response.text
+        assert "Simulate failed payment" in response.text
 
     def test_garbage_token_is_rejected(self, client):
         assert "no longer valid" in client.get("/pay/nonsense").text
@@ -127,6 +134,33 @@ class TestPayLink:
     def test_a_login_token_cannot_be_used_as_a_payment_link(self, client, pizza_headers):
         stolen = pizza_headers["Authorization"].split()[1]
         assert "no longer valid" in client.get(f"/pay/{stolen}").text
+
+    def test_demo_success_settles_the_order(self, db, client, prepaid_order):
+        """Simulating a successful demo payment must run through the SAME
+        apply_callback path a real gateway would — so all the amount checks,
+        idempotency guards, and release-to-restaurant logic exercise here."""
+        order, link = prepaid_order
+        token = link.rsplit("/", 1)[-1]
+
+        response = client.post(f"/pay/{token}/demo?outcome=success")
+        assert response.status_code == 200
+        assert "Payment successful" in response.text
+        assert order.order_number in response.text
+
+        db.expire(order)
+        assert order.payment_status.value == "paid"
+        assert order.status.value == "pending"  # released to restaurant
+
+    def test_demo_failure_leaves_order_unpaid(self, db, client, prepaid_order):
+        order, link = prepaid_order
+        token = link.rsplit("/", 1)[-1]
+
+        response = client.post(f"/pay/{token}/demo?outcome=failure")
+        assert response.status_code == 200
+        assert "Payment failed" in response.text
+
+        db.expire(order)
+        assert order.status.value == "awaiting_payment"  # customer can retry
 
     def test_expired_link_is_refused(self, db, client, prepaid_order):
         order, _ = prepaid_order
