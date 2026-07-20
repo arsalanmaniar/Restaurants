@@ -214,3 +214,72 @@ class TestFailureHandling:
         agent.handle_incoming_message(db, conversation, "hi")
 
         assert sent == [agent.FALLBACK_REPLY], "the customer must not be left in silence"
+
+
+class TestLoopDetection:
+    """A read-only tool returning the same result twice in one turn is a sign the
+    model is confused (e.g. list_restaurants returns 1 dead-end restaurant and it
+    calls again hoping for a different answer). Verified in prod as conv 690 which
+    looped "Available: 1. Mandi House" 5 turns. Nudge once per turn."""
+
+    def test_read_only_repeat_injects_nudge(
+        self, db, conversation, pizza, scripted_model
+    ):
+        """Two consecutive list_restaurants calls with identical result → the tool loop
+        should append a "try something different" system message before continuing.
+        We can't inspect the injected message from outside generate_reply, so verify
+        indirectly: on the third round the model gets a chance to see the nudge and
+        can pivot to a different tool."""
+        # First round: model calls list_restaurants
+        # Second round: model calls list_restaurants AGAIN (identical result → nudge)
+        # Third round: model calls get_menu (a different tool)
+        # Fourth round: model produces text.
+        scripted_model(
+            [
+                completion(message(tool_calls=[tool_call("a", "list_restaurants", {})])),
+                completion(message(tool_calls=[tool_call("b", "list_restaurants", {})])),
+                completion(
+                    message(tool_calls=[tool_call("c", "get_menu", {"restaurant_id": pizza.id})])
+                ),
+                completion(message(content="Here's the menu.")),
+            ]
+        )
+
+        reply, trace = agent.generate_reply(db, conversation)
+
+        # Both list_restaurants calls happened AND we didn't hit MAX_TOOL_ROUNDS
+        # (nudge fires as a system message, not a tool result — it doesn't consume
+        # a round budget itself).
+        assert reply == "Here's the menu."
+        assert [t["tool"] for t in trace] == [
+            "list_restaurants",
+            "list_restaurants",
+            "get_menu",
+        ]
+
+    def test_mutating_tool_repeat_does_not_nudge(
+        self, db, conversation, pizza, menu_item, scripted_model
+    ):
+        """add_to_cart / place_order have their own dedup guard (MUTATING_TOOLS).
+        The loop-detect nudge is only for read-only tools — mutating repeats are
+        handled separately and shouldn't also trigger the nudge."""
+        tools.get_menu(db, conversation, restaurant_id=pizza.id)
+        db.flush()
+
+        args = {"menu_item_id": menu_item.id, "quantity": 1}
+        scripted_model(
+            [
+                completion(
+                    message(
+                        tool_calls=[
+                            tool_call("a", "add_to_cart", args),
+                            tool_call("b", "add_to_cart", args),  # dedup'd by MUTATING_TOOLS guard
+                        ]
+                    )
+                ),
+                completion(message(content="Added.")),
+            ]
+        )
+
+        reply, trace = agent.generate_reply(db, conversation)
+        assert reply == "Added."

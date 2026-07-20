@@ -33,8 +33,10 @@ from app.services.whatsapp import WhatsAppError, send_text
 logger = logging.getLogger(__name__)
 
 # A well-behaved turn is 1-3 tool calls (list -> menu -> add). The cap only exists
-# to stop a confused model from looping forever and burning tokens.
-MAX_TOOL_ROUNDS = 6
+# to stop a confused model from looping forever and burning tokens. Was 6; dropped
+# to 4 because the extra headroom let a confused model burn 2-3 full round-trips
+# (~15-30s each) before the text-only salvage path fired.
+MAX_TOOL_ROUNDS = 4
 
 # Tools that change state. Re-running one of these inside a single turn with the
 # exact same arguments is never what the customer wants — it double-adds food or
@@ -107,12 +109,11 @@ Here are restaurants serving biryani:
 3. Wok & Roll
 
 Which would you like to order from? 🍴
-Name the searched dish or cuisine in the header ("Here are restaurants serving X:") \
-when the list came from search_restaurants_by_item. If you had to fall back to \
-list_restaurants with no filter, use a plain header instead ("Here are available \
-restaurants:"). If search_restaurants_by_item finds nothing, call list_restaurants \
-(with a cuisine guess, or with no filter at all) and offer those instead — never tell \
-the customer "we have nothing" without trying that fallback.
+Header uses the dish name when from search_restaurants_by_item ("Here are restaurants \
+serving X:"); use "Here are available restaurants:" when from list_restaurants. If \
+search_restaurants_by_item returns empty, fall back to list_restaurants (with or \
+without a cuisine guess) — never tell the customer "we have nothing" without trying \
+that fallback.
 3. Once they pick a restaurant (by number, name, or "show me the menu"), call get_menu \
 for that restaurant and show the items with prices as plain lines (item — Rs. price), \
 grouped naturally by category if that reads better, no markdown headers or dashes. Ask \
@@ -130,56 +131,36 @@ message straight to place_order as delivery_address. If you have not yet read th
 back to the customer, do the read-back first, get an explicit "yes"/"haan", then call \
 place_order — do not re-open the restaurant/menu selection flow.
 
-Tools are actions, not talk:
-- Never announce a tool call. Do not write "let me check", "I'll call get_menu", or "one moment". \
-Either call the tool — silently — or answer the customer. The customer cannot see your tools.
-- NEVER state a price, an item name, or a total that did not come from a tool result in this \
-conversation. If you don't have the real prices, call get_menu. Inventing a price and then \
-charging a different amount is the worst thing you can do.
-- Never do arithmetic on prices yourself. The cart subtotal and order total come from the \
-tool results — read them off, don't compute them.
+Tool & order rules:
+- Never announce tool calls ("let me check", "I'll call get_menu"). Call silently \
+or answer directly — the customer cannot see your tools.
+- Every fact — restaurant, price, item, order status — MUST come from a tool result \
+in THIS conversation. Never invent one. Never do arithmetic; subtotals and totals \
+come from the tool.
+- Before add_to_cart: call get_menu for the target restaurant so you have real item \
+ids and prices. NEVER guess a restaurant_id or menu_item_id.
+- Before place_order: read the full order back (items, quantities, delivery fee, \
+total, address) and get an explicit "yes"/"haan". Offer only the payment methods \
+listed in the system message above. Coupons pass through as coupon_code; never \
+compute discounts yourself.
+- place_order spends the customer's money — call it ONCE per order. If the customer \
+asks about an order they already placed ("where is my order?"), use get_order_status \
+— NEVER add_to_cart or place_order again. Orders in the system message above are \
+already done; never rebuild them.
 
-How to take an order (see the flow above for the order these happen in):
-- Use the tools for anything factual. Never invent a restaurant, a dish, a price, or an order status.
-- Before adding anything to the cart, call get_menu so you have real item ids and prices. \
-NEVER guess a restaurant_id or a menu_item_id — they must come from a tool result you have \
-actually seen in this conversation.
-- Before placing an order, read the whole thing back — items, quantities, delivery fee, total — \
-and get an explicit "yes". Do not call place_order until they confirm.
-- If you don't have a delivery address, ask for one before placing the order.
-- Offer ONLY the payment methods listed as available in the system message above. If a \
-customer asks for one that isn't listed, say it's coming soon — never promise it.
-- If the customer mentions a coupon or promo code, pass it to place_order as coupon_code. \
-Never work out the discount yourself; the tool result tells you the real one.
+Cart discipline:
+- If the customer is only ASKING about the cart ("how much?", "what did I order?"), \
+read from the cart shown above — do NOT call add_to_cart again.
+- Ambiguous cart messages — especially with a negation ("not", "no", "don't", "nahi", \
+"sirf", "only", "bas") near an item name — ASK to clarify before touching the cart. \
+e.g. "Not only chicken biryani" could mean "just the one" OR "add something else"; \
+read it back and confirm. Cart mistakes cost the customer money.
 
-The cart is not a scratchpad:
-- add_to_cart ADDS to the quantity already in the cart — calling it twice for the same item \
-gives the customer double the food. The current cart is shown to you above, every turn.
-- If the customer is only ASKING about the cart or the total ("how much?", "what did I order?"), \
-just read it off the cart shown above. Do NOT call add_to_cart again.
-- If the customer's message about the cart is AMBIGUOUS — anything that could plausibly mean \
-"add more" OR "keep as is" OR "remove" — ASK to clarify before touching the cart. Do not guess. \
-Cart mistakes cost the customer money. Especially when their message contains a negation \
-("not", "no", "don't", "nahi", "sirf", "only", "bas") near an item name: read the words back \
-and confirm. e.g. "Not only chicken biryani" could mean "just the one biryani, nothing else" \
-or "add something besides biryani" — you cannot tell, so ask. Never silently change quantity.
-
-Never place an order twice:
-- place_order is the only tool that spends the customer's money. Call it ONCE, only when the \
-customer has just confirmed a cart you built with them in this conversation.
-- If the customer asks about an order they already placed ("where is my order?", "has it \
-shipped?"), that is NOT a new order. Call get_order_status. Do NOT call add_to_cart or \
-place_order.
-- The system message above lists orders this customer has already placed. Those are done. \
-Never rebuild or re-place them.
-
-When you're stuck:
-- If a tool returns an error, tell the customer plainly what went wrong and offer the next step.
-- If the customer is angry, wants a refund, or asks for something you have no tool for, \
-say a human will follow up shortly. Don't make promises on the restaurant's behalf.
-- Never claim to have done something you have no tool for. You cannot phone the restaurant, \
-chase a rider, or speed up an order. Saying "I've asked the restaurant to look into it" when \
-you have not is a lie to the customer. Report the order's real status and stop there.
+When stuck:
+- If a tool returns an error, tell the customer plainly and offer the next step.
+- If the customer is angry, wants a refund, or asks for something you have no tool \
+for, say a human will follow up shortly. Never promise on the restaurant's behalf \
+or claim to have done things you cannot (like phoning the restaurant).
 """
 
 
@@ -237,7 +218,18 @@ def _menu_facts(conversation: Conversation) -> str:
     """The last menu the customer was shown, with real prices."""
     context = conversation.context or {}
     menu = context.get("shown_menu") or []
+    shown_restaurant = context.get("shown_menu_restaurant") or ""
+
     if not menu:
+        # If we called get_menu on a restaurant with no items, be loud about it:
+        # the model has been observed quoting invented prices when a menu is empty.
+        # This kills the hallucination path — the model MUST know not to make up numbers.
+        if shown_restaurant:
+            return (
+                f"You have shown NO items for {shown_restaurant} to the customer "
+                "(the restaurant has no menu items available). Do NOT quote any price. "
+                "Suggest another restaurant or fall back to list_restaurants."
+            )
         return ""
 
     lines = [f"- [{i['id']}] {i['name']} — Rs. {i['price']}" for i in menu]
@@ -443,6 +435,14 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
 
     forced_once = False
 
+    # Loop detection for read-only tools: the model has been observed calling the
+    # same read-only tool 3-5 times in one turn (e.g. list_restaurants returning a
+    # single dead-end restaurant, model repeats the call hoping for a different
+    # answer). Track the JSON hash of each read-only tool result and nudge the
+    # model — once per turn — when it repeats one.
+    read_only_result_hashes: set[str] = set()
+    loop_nudge_sent = False
+
     for _ in range(MAX_TOOL_ROUNDS):
         try:
             completion = _complete(client, messages, use_tools=True, force_tool=force_next)
@@ -567,6 +567,28 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                     "content": json.dumps(result, default=str),
                 }
             )
+
+            # Loop-detect: if a read-only tool returns an identical result
+            # inside this turn, nudge the model once. Mutating tools are excluded
+            # (they legitimately return the same cart snapshot the second time).
+            if name not in MUTATING_TOOLS:
+                result_hash = json.dumps(result, sort_keys=True, default=str)
+                if result_hash in read_only_result_hashes and not loop_nudge_sent:
+                    loop_nudge_sent = True
+                    logger.info(
+                        "conversation %s: loop-detect nudge after %s returned same result twice",
+                        conversation.id, name,
+                    )
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "You just got the same tool result again. Try a different "
+                                "tool or different arguments — do not repeat this call."
+                            ),
+                        }
+                    )
+                read_only_result_hashes.add(result_hash)
 
     # Round budget exhausted while still calling tools. Critically, place_order may
     # have already run — the old behaviour ("sorry, say that again") hid a real

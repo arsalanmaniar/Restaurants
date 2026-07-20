@@ -12,6 +12,12 @@ logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
+# Even under DEBUG=true, httpx/httpcore's per-request connection/handshake logs
+# drown out the app's own logs (a single Groq call produces ~15 DEBUG lines about
+# TCP/TLS mechanics that no one debugging AbhiAya cares about). Pin them at
+# WARNING so real errors still surface.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title=settings.app_name, version="0.1.0")

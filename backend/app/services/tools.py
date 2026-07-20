@@ -93,7 +93,7 @@ def list_restaurants(db: Session, conversation: Conversation, cuisine: str | Non
             else f"No open restaurants match '{cuisine}'.",
         }
 
-    return {
+    payload: dict = {
         "restaurants": [
             {
                 "id": r.id,
@@ -105,6 +105,16 @@ def list_restaurants(db: Session, conversation: Conversation, cuisine: str | Non
             for r in restaurants
         ]
     }
+    # A single-restaurant result with a cuisine filter is a common dead-end (that
+    # one restaurant might not actually serve the specific dish the customer
+    # wanted). Hint at the smarter fallback so the model doesn't just present the
+    # lone result as final.
+    if cuisine and len(restaurants) == 1:
+        payload["note"] = (
+            f"Only one match for '{cuisine}'. If the customer's dish isn't on this "
+            "restaurant's menu, call search_restaurants_by_item next."
+        )
+    return payload
 
 
 def search_restaurants_by_item(
