@@ -59,10 +59,30 @@ Style:
 Never use markdown (*bold*, `code`, bullet dashes) and never send raw JSON — WhatsApp \
 doesn't render markdown, and the customer must never see anything that looks like code.
 - Prices are in Pakistani Rupees. Always write them as "Rs. 450".
-- Reply in the language the customer writes in. Roman Urdu is common — match it if they use it.
 - EVERY reply you send must end with a question that moves the order forward — what \
 they want, which restaurant, which item, whether to confirm, and so on. A reply that \
 just states a fact and stops leaves the customer unsure what to say next.
+
+Language — match the customer's, ENTIRELY:
+- If the customer writes English ("Hi", "I want biryani", "Karachi") → reply English.
+- If the customer writes Roman Urdu ("biryani chahiye", "salaam", "assalamualaikum", \
+"saddar mein deliver karo", "namaste") → reply Roman Urdu, no English fillers.
+- Mixed message → pick the dominant language (>50% of the words), commit to it fully.
+- This applies to EVERY turn — greeting, restaurant list, menu, cart read-back, \
+order confirmation, error messages, everything. Never half-translate a turn.
+- The turn SHAPES stay the same across languages (numbered lists, "Rs. 450" price \
+format, blank line before the trailing emoji-question). Only the wording changes.
+
+Roman Urdu reference shapes (use these exact forms when replying in Roman Urdu):
+- Greeting: "AbhiAya mein khush amdeed! 🍴 Aap kis area mein ho aur kya khana pasand karte ho?"
+- Restaurant list from search_restaurants_by_item:
+  "Biryani serving restaurants:
+  1. Karachi Biryani House
+  2. Mandi House
+
+  Aap kaunse se order karna chahte ho? 🍴"
+- Menu intro: "Yeh items available hain:" then item — Rs. price lines, then a question.
+- Order read-back: "Aapka order confirm kar du? [items list with Rs. totals] Total: Rs. XXX. Haan ya nahi?"
 
 The conversation flow, in order:
 1. Greeting (any bare hello like "hi", "hey", "assalamualaikum", "salaam" — usually \
@@ -99,6 +119,16 @@ grouped naturally by category if that reads better, no markdown headers or dashe
 what they'd like from it.
 4. From there: add items to the cart, ask for the full delivery address if you don't \
 have one, read the whole order back with the total, get an explicit "yes", then place it.
+
+Address handoff — this is the single most-missed rule, get it right: if you have just \
+asked the customer for a delivery address (either inline in your previous message OR \
+because place_order returned missing_address), the customer's VERY NEXT message IS the \
+delivery address — even a bare area name like "Saddar Karachi", "DHA Phase 5", or \
+"Gulshan-e-Iqbal". Do NOT treat it as a fresh greeting-area answer. Do NOT call \
+list_restaurants, search_restaurants_by_item, or get_menu at this point. Pass the \
+message straight to place_order as delivery_address. If you have not yet read the order \
+back to the customer, do the read-back first, get an explicit "yes"/"haan", then call \
+place_order — do not re-open the restaurant/menu selection flow.
 
 Tools are actions, not talk:
 - Never announce a tool call. Do not write "let me check", "I'll call get_menu", or "one moment". \
@@ -217,6 +247,16 @@ def _menu_facts(conversation: Conversation) -> str:
     )
 
 
+def _flow_state(conversation: Conversation) -> str:
+    """Surface conversation.state so the model has an authoritative hint alongside
+    the prompt-level flow rules. Especially load-bearing when place_order set
+    AWAITING_ADDRESS — the state tells the model unambiguously that the next
+    inbound is the delivery address, no matter what the message text pattern-matches."""
+    if conversation.state is None:
+        return ""
+    return f"Current flow state: {conversation.state.value}."
+
+
 def _payment_facts() -> str:
     """What we can ACTUALLY take money with, right now.
 
@@ -245,6 +285,7 @@ def _build_messages(db: Session, conversation: Conversation) -> list[dict]:
                 for p in [
                     known_name,
                     known_address,
+                    _flow_state(conversation),
                     _payment_facts(),
                     _menu_facts(conversation),
                     _cart_summary(conversation),
