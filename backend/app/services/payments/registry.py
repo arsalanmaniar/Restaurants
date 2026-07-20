@@ -40,14 +40,46 @@ def is_configured(name: PaymentProviderName) -> bool:
         return False
 
 
+def _fake_stand_in_available() -> bool:
+    """Whether the FAKE provider is usable — i.e. we're in DEBUG mode. When true,
+    we can offer JazzCash / EasyPaisa as options for demo/testing even without
+    real merchant credentials (the callback still runs through FakeProvider's
+    signed pipeline — every guard on the money path is exercised for real)."""
+    return settings.debug and is_configured(PaymentProviderName.FAKE)
+
+
+def provider_for_method(method: PaymentMethod) -> PaymentProviderName:
+    """The provider that will actually settle this method's payments.
+
+    Real provider if its credentials are set. Otherwise, in DEBUG mode, fall
+    back to the FAKE provider so the flow can be demoed end-to-end without
+    real merchant onboarding. In production (DEBUG=false) an unconfigured
+    method raises ProviderNotConfigured — matching what `available_methods()`
+    would have hidden from the AI in the first place.
+
+    COD is not a gateway-backed method (money changes hands at delivery, not
+    through a payment adapter). place_order returns before calling this for
+    COD orders; asking here would mean COD has been misrouted.
+    """
+    if method == PaymentMethod.COD:
+        raise ProviderNotConfigured(
+            "cod is settled at delivery, not through a payment provider"
+        )
+    real = PROVIDER_FOR_METHOD.get(method)
+    if real is not None and is_configured(real):
+        return real
+    if _fake_stand_in_available():
+        return PaymentProviderName.FAKE
+    raise ProviderNotConfigured(f"{method.value} is not available")
+
+
 def available_methods() -> list[PaymentMethod]:
-    """Payment methods we can genuinely offer. COD always works; the online ones only
-    once credentials exist — so the AI never offers a payment option that would then
-    fail at the last step."""
+    """Payment methods we can genuinely offer. COD always works; online ones need
+    either real credentials, or the FAKE stand-in in DEBUG mode. The AI never
+    offers a payment option that would then fail at the last step."""
     methods = [PaymentMethod.COD]
-    methods.extend(
-        method
-        for method, provider in PROVIDER_FOR_METHOD.items()
-        if is_configured(provider)
-    )
+    fake_ok = _fake_stand_in_available()
+    for method, provider in PROVIDER_FOR_METHOD.items():
+        if is_configured(provider) or fake_ok:
+            methods.append(method)
     return methods

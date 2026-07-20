@@ -21,7 +21,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.core.config import settings
 from app.services import coupons as coupons_service
 from app.services.opening_hours import is_open
-from app.services.payments.registry import PROVIDER_FOR_METHOD, available_methods
+from app.services.payments.registry import available_methods, provider_for_method
 from app.services.payments.service import start_payment
 
 from app.models import (
@@ -594,7 +594,7 @@ def place_order(
     if not prepaid:
         return result
 
-    payment, link = start_payment(db, order, PROVIDER_FOR_METHOD[method])
+    payment, link = start_payment(db, order, provider_for_method(method))
     result["payment_link"] = link
     result["payment_expires_in_minutes"] = settings.payment_expiry_minutes
     # Spelled out for the model, because getting this wrong means telling the customer
