@@ -1,12 +1,20 @@
 """Admin dashboard: approvals, plans, cross-restaurant views, platform revenue."""
 
-from datetime import date
+from datetime import date, time
 from decimal import Decimal
 
 from sqlalchemy import select
 
 from app.core.security import verify_password
-from app.models import MenuItem, OrderStatus, PaymentMethod, Restaurant, RestaurantStaff, RestaurantStatus
+from app.models import (
+    MenuItem,
+    OrderStatus,
+    PaymentMethod,
+    Restaurant,
+    RestaurantStaff,
+    RestaurantStatus,
+    RestaurantWorkingHours,
+)
 from app.services import tools
 
 
@@ -35,6 +43,21 @@ class TestRestaurantApproval:
             commission_rate=Decimal("15.00"),
         )
         db.add(signup)
+        db.flush()
+        # Signup restaurants created inside a test miss the autouse `always_open`
+        # fixture (which ran before the test body). Since `is_open()` now treats
+        # "no hours" as closed, we have to add hours explicitly here — otherwise
+        # the assertion would fail even though approval succeeded.
+        for day_of_week in range(7):
+            db.add(
+                RestaurantWorkingHours(
+                    restaurant_id=signup.id,
+                    day_of_week=day_of_week,
+                    opens_at=time(0, 0),
+                    closes_at=time(23, 59, 59),
+                    crosses_midnight=False,
+                )
+            )
         db.flush()
 
         response = client.patch(

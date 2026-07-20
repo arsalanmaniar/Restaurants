@@ -89,12 +89,15 @@ class TestIsOpen:
         db.flush()
         assert is_open(scheduled, at(MONDAY, 13, 0)) is False
 
-    def test_no_schedule_means_always_open(self, db, pizza):
-        """Deliberate: the alternative would have made every existing restaurant vanish
-        from WhatsApp the moment this feature shipped."""
+    def test_no_schedule_means_always_closed(self, db, pizza):
+        """Flipped default: a restaurant with no working_hours rows is a data bug
+        (unfinished stub / never-onboarded merchant) rather than a 24/7 kitchen.
+        The old "no hours = open" default let an empty-menu stub restaurant become
+        the only "open" option during other restaurants' shift gaps and dead-ended
+        customers trying to order from it."""
         pizza.working_hours.clear()
         db.flush()
-        assert is_open(pizza, at(MONDAY, 3, 0)) is True
+        assert is_open(pizza, at(MONDAY, 3, 0)) is False
 
 
 class TestClosedRestaurantsAreUnorderable:

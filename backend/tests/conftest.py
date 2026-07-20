@@ -125,11 +125,30 @@ def always_open(db):
     closed", because that is a gap between shifts. A test that passes at lunchtime and
     fails at teatime is worse than no test.
 
-    Clearing the schedule means "always open" (see services/opening_hours.py), and it is
-    rolled back with the test. test_opening_hours.py installs its own schedule and so is
-    unaffected.
+    The whole schedule is replaced with a Mon-Sun 00:00-23:59 always-open one for every
+    restaurant. Rolled back with the test. test_opening_hours.py installs its own schedule
+    and so is unaffected.
+
+    Previously we just DELETEd all rows and relied on `is_open()` treating "no hours"
+    as always-open, but that default was itself a data-integrity trap (a stub
+    restaurant with no menu and no hours was silently offered to real customers),
+    so the default was flipped to closed. This fixture now inserts explicit hours
+    instead of leaning on the default.
     """
     db.execute(delete(RestaurantWorkingHours))
+    db.flush()
+
+    for restaurant in db.scalars(select(Restaurant)).all():
+        for day_of_week in range(7):
+            db.add(
+                RestaurantWorkingHours(
+                    restaurant_id=restaurant.id,
+                    day_of_week=day_of_week,
+                    opens_at=time(0, 0),
+                    closes_at=time(23, 59, 59),
+                    crosses_midnight=False,
+                )
+            )
     db.flush()
 
 

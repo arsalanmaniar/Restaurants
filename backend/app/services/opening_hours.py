@@ -6,8 +6,11 @@ and at UTC a Karachi restaurant would appear to open at 4pm.
 Rules, in order:
   1. `is_accepting_orders = False` -> closed, always. It's the manual "stop taking
      orders" switch and must beat any schedule.
-  2. No working hours configured at all -> treated as OPEN. Otherwise every existing
-     restaurant would silently vanish from WhatsApp the moment this feature shipped.
+  2. No working hours configured at all -> treated as CLOSED. A restaurant with no
+     hours is a data bug, not a 24/7 kitchen: the old "no hours = open" default
+     let an unfinished stub restaurant (empty menu + no hours) become the only
+     "open" option during the gap between other restaurants' lunch/dinner windows,
+     and the customer dead-ended trying to order from it.
   3. Otherwise -> open only inside a configured period for the current weekday.
 """
 
@@ -32,7 +35,7 @@ def is_open(restaurant: Restaurant, at: datetime | None = None) -> bool:
 
     hours = list(restaurant.working_hours)
     if not hours:
-        return True
+        return False
 
     moment = (at or datetime.now(PAKISTAN_TZ)).astimezone(PAKISTAN_TZ)
     today = moment.weekday()
