@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   Button,
@@ -11,10 +11,12 @@ import {
   STATUS_ACCENT,
   StatTile,
   StatusBadge,
+  Toast,
   money,
   timeAgo,
 } from "@/components/ui";
 import { api } from "@/lib/api";
+import { playNewOrderSound } from "@/lib/notifications";
 import {
   NEXT_STATUSES,
   STATUS_LABELS,
@@ -36,8 +38,16 @@ const STATUS_LEGEND: OrderStatus[] = [
 
 // Orders arrive from WhatsApp with no page open, so the list must refresh itself.
 // Polling is the right call at this scale — a few hundred orders/day across 20
-// restaurants does not justify a WebSocket layer.
-const POLL_INTERVAL_MS = 15_000;
+// restaurants does not justify a WebSocket layer. 8s balances "kitchen hears
+// the ding fast" against server load; SSE would be a clean upgrade later if 8s
+// ever feels slow.
+const POLL_INTERVAL_MS = 8_000;
+
+// Order IDs already visible when the tab opened. The first poll is a
+// snapshot, not "new orders" — otherwise every existing order would fire a
+// toast on page load. Same story when the customer toggles active_only:
+// the set of visible IDs changes wholesale, and none of that is "new".
+type ToastEntry = { id: string; message: string };
 
 export default function OrdersPage() {
   const [orders, setOrders] = useState<Order[]>([]);
@@ -46,6 +56,16 @@ export default function OrdersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [updating, setUpdating] = useState<number | null>(null);
+  const [toasts, setToasts] = useState<ToastEntry[]>([]);
+
+  const knownOrderIds = useRef<Set<number>>(new Set());
+  // "This is the first load in the current active_only window" — flipped back
+  // to true every time the toggle changes, so the toggle itself never rings.
+  const firstLoadForFilter = useRef(true);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((current) => current.filter((t) => t.id !== id));
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -53,6 +73,28 @@ export default function OrdersPage() {
         api.get<Order[]>(`/restaurant/orders?active_only=${activeOnly}`),
         api.get<RestaurantStats>("/restaurant/stats"),
       ]);
+
+      // Diff for new arrivals — skip on the very first load after a filter
+      // change so we don't fire a toast for every existing order.
+      if (!firstLoadForFilter.current) {
+        const arrivals = nextOrders.filter((o) => !knownOrderIds.current.has(o.id));
+        if (arrivals.length > 0) {
+          setToasts((current) => [
+            ...current,
+            ...arrivals.map((o) => ({
+              // Numeric ids collide across toggles; suffix random so React keys stay unique.
+              id: `${o.id}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              message: `🔔 New order ${o.order_number} — ${money(o.total_amount)}`,
+            })),
+          ]);
+          // One ding regardless of how many arrived in this tick — bulk arrivals
+          // in a single 8s window don't need to sound like a fire alarm.
+          playNewOrderSound();
+        }
+      }
+      knownOrderIds.current = new Set(nextOrders.map((o) => o.id));
+      firstLoadForFilter.current = false;
+
       setOrders(nextOrders);
       setStats(nextStats);
       setError(null);
@@ -61,6 +103,13 @@ export default function OrdersPage() {
     } finally {
       setLoading(false);
     }
+  }, [activeOnly]);
+
+  // Reset diff state whenever the filter changes so toggling active_only <-> all
+  // does not ring the bell for every order that "appeared" from switching lens.
+  useEffect(() => {
+    firstLoadForFilter.current = true;
+    knownOrderIds.current = new Set();
   }, [activeOnly]);
 
   useEffect(() => {
@@ -90,6 +139,16 @@ export default function OrdersPage() {
 
   return (
     <div className="space-y-6">
+      {toasts.length > 0 && (
+        <div className="pointer-events-none fixed right-4 top-4 z-50 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2">
+          {toasts.map((t) => (
+            <div key={t.id} className="pointer-events-auto">
+              <Toast message={t.message} onDismiss={() => dismissToast(t.id)} />
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="grid gap-4 sm:grid-cols-3">
         <StatTile
           label="Active orders"

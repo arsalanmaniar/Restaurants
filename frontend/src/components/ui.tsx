@@ -1,6 +1,7 @@
 "use client";
 
 import { clsx } from "clsx";
+import { useEffect } from "react";
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
 
 import {
@@ -182,6 +183,30 @@ export function ErrorNote({ children }: { children: ReactNode }) {
     <p className="rounded-lg bg-[#7A3B34]/10 px-3 py-2 text-sm text-[#7A3B34]">
       {children}
     </p>
+  );
+}
+
+/** Fixed-position notification (used for the new-order ping on the restaurant
+ *  dashboard). Auto-dismisses after 5s; the parent renders these inside a
+ *  positioned stack so multiple pings can coexist. */
+export function Toast({
+  message,
+  onDismiss,
+}: {
+  message: string;
+  onDismiss: () => void;
+}) {
+  useEffect(() => {
+    const timer = setTimeout(onDismiss, 5000);
+    return () => clearTimeout(timer);
+  }, [onDismiss]);
+  return (
+    <div
+      role="status"
+      className="rounded-lg border-l-[3px] border-marigold-saffron bg-cast-iron px-4 py-3 text-sm text-ash-flour shadow-lg"
+    >
+      {message}
+    </div>
   );
 }
 

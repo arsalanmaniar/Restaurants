@@ -129,7 +129,9 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "enum": ["cod", "jazzcash", "easypaisa"],
                         "description": (
-                            "How the customer wants to pay. Defaults to cash on delivery. "
+                            "How the customer wants to pay. Must match what the customer "
+                            "explicitly chose when you asked them (only ask if more than one "
+                            "payment method is available; otherwise use the only one). "
                             "If they choose jazzcash or easypaisa the order is NOT confirmed "
                             "until they pay — the tool result will include a payment_link "
                             "you must send them."
@@ -147,7 +149,7 @@ TOOL_SCHEMAS = [
                         ),
                     },
                 },
-                "required": [],
+                "required": ["payment_method"],
             },
         },
     },
