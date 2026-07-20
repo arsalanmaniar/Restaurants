@@ -1,5 +1,5 @@
-"""End-to-end walk through the new conversation flow: greeting -> delivery area ->
-what they want -> restaurants serving it -> menu -> add to cart.
+"""End-to-end walk through the conversation flow: greeting (with inline restaurant
+list) -> pick restaurant -> menu -> add to cart.
 
 The Groq client is stubbed with a scripted sequence of responses per turn, exactly
 like tests/test_agent_guards.py — deterministic, no network, no token cost. Each
@@ -69,54 +69,36 @@ class TestNewOrderingFlow:
             )
         )
 
-        # Turn 1: "hi" -> greeting, asks for delivery area + what they'd like. No tools.
+        # Turn 1: "hi" -> greeting turn now calls list_restaurants, replies with the
+        # combined greeting + numbered list + "pick one" question in ONE message.
         scripted_model(
             [
                 completion(
+                    message(tool_calls=[tool_call("a", "list_restaurants", {})])
+                ),
+                completion(
                     message(
                         content=(
-                            "Welcome to AbhiAya! 🍴 Which area should we deliver to, "
-                            "and what would you like to eat today?"
+                            "Welcome to AbhiAya! 🍴\n\n"
+                            "Available restaurants:\n"
+                            "1. Karachi Biryani House\n"
+                            "2. Pizza Junction\n"
+                            "3. Wok & Roll\n\n"
+                            "Which would you like to order from? 🍴"
                         )
                     )
-                )
+                ),
             ]
         )
         agent.handle_incoming_message(db, conversation, "hi")
 
-        # Turn 2: gives the area -> AI asks what they want to eat. No tools.
-        scripted_model(
-            [completion(message(content="Karachi Saddar, noted 📍 What would you like to eat?"))]
-        )
-        agent.handle_incoming_message(db, conversation, "Karachi, Saddar")
+        greeting_reply = sent[-1]
+        assert "Welcome to AbhiAya!" in greeting_reply
+        assert "Available restaurants:" in greeting_reply
+        assert "1. " in greeting_reply, "restaurant list must be numbered"
+        assert greeting_reply.rstrip().endswith("🍴"), "must end with the emoji-question"
 
-        # Turn 3: "biryani" -> search_restaurants_by_item, then a numbered list.
-        scripted_model(
-            [
-                completion(
-                    message(
-                        tool_calls=[
-                            tool_call(
-                                "a", "search_restaurants_by_item", {"query": "biryani"}
-                            )
-                        ]
-                    )
-                ),
-                completion(
-                    message(
-                        content=(
-                            "Yeh restaurants biryani serve karte hain:\n"
-                            "1. Karachi Biryani House\n"
-                            "\n"
-                            "Konsa pasand karain gay? 🍴"
-                        )
-                    )
-                ),
-            ]
-        )
-        agent.handle_incoming_message(db, conversation, "biryani")
-
-        # Turn 4: picks the restaurant -> get_menu, then items with prices.
+        # Turn 2: picks the restaurant by name -> get_menu, then items with prices.
         scripted_model(
             [
                 completion(
@@ -142,9 +124,9 @@ class TestNewOrderingFlow:
                 ),
             ]
         )
-        agent.handle_incoming_message(db, conversation, "1")
+        agent.handle_incoming_message(db, conversation, "Karachi Biryani House")
 
-        # Turn 5: "2 chicken biryani" -> add_to_cart, then asks for delivery address.
+        # Turn 3: "2 chicken biryani" -> add_to_cart, then asks for delivery address.
         scripted_model(
             [
                 completion(
@@ -170,7 +152,7 @@ class TestNewOrderingFlow:
         )
         agent.handle_incoming_message(db, conversation, "2 chicken biryani")
 
-        assert len(sent) == 5
+        assert len(sent) == 3
         for reply in sent:
             assert not agent._leaks_tool_call(reply)
 
