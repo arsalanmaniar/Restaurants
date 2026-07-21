@@ -6,12 +6,14 @@ loses track of what it already did. Every test here corresponds to a bug that ac
 happened during development.
 """
 
+from datetime import datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
-from app.models import Conversation, MenuItem, Order, OrderStatus, PaymentStatus
-from app.services import tools
+from app.models import Conversation, MenuItem, Order, OrderRating, OrderStatus, PaymentStatus
+from app.services import ranking, tools
 
 
 class TestListRestaurants:
@@ -387,3 +389,126 @@ class TestFindPastOrder:
         assert isinstance(candidate["items"], list)
         assert "name" in candidate["items"][0]
         assert "quantity" in candidate["items"][0]
+
+
+KARACHI = ZoneInfo("Asia/Karachi")
+
+
+def _rate(db, order, customer, restaurant_id, rating: int):
+    """Attach a rating to an existing order — used to seed high/low rated
+    restaurants so the ranking formula has real numbers to work with."""
+    db.add(OrderRating(
+        order_id=order.id,
+        restaurant_id=restaurant_id,
+        customer_id=customer.id,
+        rating=rating,
+        source="test",
+    ))
+    db.flush()
+
+
+class TestRestaurantRanking:
+    """Ranking = 3*relevance + 2*rating + rotation_seed. Pins each signal
+    independently, plus the two invariants that matter most in a live system:
+    (a) same day → same order (deterministic), (b) different days → different
+    top slot (rotation actually rotates)."""
+
+    def test_ranking_note_is_attached_to_each_result(self, db, conversation):
+        result = tools.list_restaurants(db, conversation)
+        assert result["restaurants"], "seed data has no open restaurants"
+        for entry in result["restaurants"]:
+            assert "ranking_note" in entry
+            assert entry["ranking_note"], "note must not be empty"
+
+    def test_search_by_item_attaches_ranking_note(self, db, conversation):
+        result = tools.search_restaurants_by_item(db, conversation, query="pizza")
+        for entry in result["restaurants"]:
+            assert "ranking_note" in entry
+            # Search matches carry the item-name in the reason string
+            assert "serves" in entry["ranking_note"].lower()
+
+    def test_higher_rated_restaurant_ranks_above_unrated(self, db, conversation, pizza, biryani, cod_order, customer):
+        # cod_order is a Pizza Junction order — rate it 5 stars
+        _rate(db, cod_order, customer, pizza.id, 5)
+
+        result = tools.list_restaurants(db, conversation)
+        names = [r["name"] for r in result["restaurants"]]
+
+        # Pizza Junction (5 stars) must rank strictly above Karachi Biryani
+        # House (no ratings, at the neutral prior 0.5).
+        assert "Pizza Junction" in names
+        assert "Karachi Biryani House" in names
+        assert names.index("Pizza Junction") < names.index("Karachi Biryani House")
+
+    def test_ranking_is_deterministic_within_a_day(self, db, conversation):
+        a = tools.list_restaurants(db, conversation)
+        b = tools.list_restaurants(db, conversation)
+        assert [r["name"] for r in a["restaurants"]] == [r["name"] for r in b["restaurants"]]
+
+    def test_rotation_actually_rotates_across_days(self, db, pizza, biryani):
+        """The whole point of the daily rotation is that the top slot changes
+        day to day, not that it's random per request. Sample many days and
+        confirm at least two different names lead."""
+        from app.models import Restaurant
+        from sqlalchemy import select
+
+        candidates = db.scalars(select(Restaurant)).all()
+        assert len(candidates) >= 2, "need multiple restaurants for rotation to matter"
+
+        base = datetime(2026, 1, 1, 12, 0, tzinfo=KARACHI)
+        top_names_by_day = set()
+        for day_offset in range(0, 30):
+            at = base + timedelta(days=day_offset)
+            ranked = ranking.rank_restaurants(db, candidates, at=at)
+            top_names_by_day.add(ranked[0].restaurant.name)
+
+        assert len(top_names_by_day) >= 2, (
+            f"rotation is broken — same restaurant led for 30 days straight "
+            f"({top_names_by_day})"
+        )
+
+    def test_relevance_beats_rating(self, db, conversation, pizza, biryani, cod_order, customer):
+        """A matched search result must outrank a highly-rated non-match — a
+        biryani query cannot return Pizza Junction just because it has 5 stars.
+        Pins the '3*relevance vs 2*rating' weight choice."""
+        _rate(db, cod_order, customer, pizza.id, 5)
+
+        # search_restaurants_by_item only returns MATCHED restaurants, so this
+        # test is really "make sure Pizza Junction doesn't sneak into a biryani
+        # search". Belt-and-braces against a future 'return all if no match'
+        # regression that would defeat relevance entirely.
+        result = tools.search_restaurants_by_item(db, conversation, query="biryani")
+        names = [r["name"] for r in result["restaurants"]]
+        assert "Pizza Junction" not in names, (
+            "biryani search must not return Pizza Junction, even with 5-star rating"
+        )
+        assert "Karachi Biryani House" in names
+
+    def test_rotation_seed_is_bounded(self):
+        """The rotation weight must never overwhelm rating (2.0). Sample every
+        rotation seed for a big range of (restaurant_id, day) pairs and confirm
+        it stays inside the documented [0, 0.1) window."""
+        from app.services.ranking import ROTATION_MAX, _rotation_seed
+
+        from datetime import date
+        for rid in range(1, 100):
+            for day_offset in range(0, 400):
+                seed = _rotation_seed(rid, date.fromordinal(730000 + day_offset))
+                assert 0.0 <= seed < ROTATION_MAX, f"seed {seed} out of range for {rid=} {day_offset=}"
+
+    def test_no_customer_data_leaks_into_ranking(self, db, conversation, pizza, biryani, cod_order, customer):
+        """Ranking must not depend on which customer is asking — otherwise a
+        restaurant could be ranked higher for one customer than another based
+        on their own past orders, which is not what we want here (that's the
+        personalisation feature, a separate scoped change later)."""
+        from app.services import conversations as convo
+
+        _rate(db, cod_order, customer, pizza.id, 5)
+
+        other = convo.get_or_create_customer(db, "923004440000")
+        other_conv = convo.get_or_create_conversation(db, other)
+        db.flush()
+
+        a = [r["name"] for r in tools.list_restaurants(db, conversation)["restaurants"]]
+        b = [r["name"] for r in tools.list_restaurants(db, other_conv)["restaurants"]]
+        assert a == b

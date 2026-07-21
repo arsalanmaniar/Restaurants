@@ -20,6 +20,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import settings
 from app.services import coupons as coupons_service
+from app.services import ranking
 from app.services.opening_hours import is_open
 from app.services.payments.registry import available_methods, provider_for_method
 from app.services.payments.service import start_payment
@@ -93,16 +94,26 @@ def list_restaurants(db: Session, conversation: Conversation, cuisine: str | Non
             else f"No open restaurants match '{cuisine}'.",
         }
 
+    # Rank instead of taking the alphabetical order the SQL returned. Old
+    # behaviour: "Karachi Biryani House" always at position 1. New: relevance
+    # (nil for undifferentiated list) + live rating + daily rotation seed —
+    # see services/ranking.py.
+    ranked = ranking.rank_restaurants(db, restaurants)
+
     payload: dict = {
         "restaurants": [
             {
-                "id": r.id,
-                "name": r.name,
-                "cuisine": r.cuisine_type,
-                "delivery_fee": _money(r.delivery_fee),
-                "min_order": _money(r.min_order_amount),
+                "id": rr.restaurant.id,
+                "name": rr.restaurant.name,
+                "cuisine": rr.restaurant.cuisine_type,
+                "delivery_fee": _money(rr.restaurant.delivery_fee),
+                "min_order": _money(rr.restaurant.min_order_amount),
+                # Model-facing explanation for the ranking position. Meant to be
+                # quotable verbatim if a customer asks "why this one?". Never
+                # leaks the formula or the rotation logic.
+                "ranking_note": rr.reason,
             }
-            for r in restaurants
+            for rr in ranked
         ]
     }
     # A single-restaurant result with a cuisine filter is a common dead-end (that
@@ -145,9 +156,11 @@ def search_restaurants_by_item(
     ).all()
 
     matches: dict[int, dict] = {}
+    restaurant_by_id: dict[int, Restaurant] = {}
     for restaurant, item_name in rows:
         if not is_open(restaurant):
             continue  # same "don't offer a dark kitchen" rule as list_restaurants
+        restaurant_by_id[restaurant.id] = restaurant
         entry = matches.setdefault(
             restaurant.id,
             {
@@ -160,15 +173,28 @@ def search_restaurants_by_item(
         if len(entry["matched_items"]) < 5 and item_name not in entry["matched_items"]:
             entry["matched_items"].append(item_name)
 
-    restaurants = list(matches.values())[:20]
-
-    if not restaurants:
+    if not matches:
         return {
             "restaurants": [],
             "note": f"No open restaurant has an item matching '{query}'.",
         }
 
-    return {"query": query, "restaurants": restaurants}
+    # Rank: matched_items carries the relevance signal (=1.0), so every
+    # match here gets the full relevance bump. Rating + rotation then sort
+    # among them. Cap at 20 in ranked order (was 20 in insertion order).
+    ranked = ranking.rank_restaurants(
+        db,
+        list(restaurant_by_id.values()),
+        matched_items_by_id={rid: entry["matched_items"] for rid, entry in matches.items()},
+    )[:20]
+
+    return {
+        "query": query,
+        "restaurants": [
+            {**matches[rr.restaurant.id], "ranking_note": rr.reason}
+            for rr in ranked
+        ],
+    }
 
 
 def _resolve_restaurant(
