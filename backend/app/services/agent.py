@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models import Conversation, MessageDirection, Order
+from app.models import Conversation, MessageDirection, Order, Restaurant
 from app.services import conversations as convo
 from app.services import prefilter
 from app.services.payments.registry import available_methods
@@ -187,13 +187,19 @@ Which would you like to order from? 🍴
 Header uses the customer's own word when from `find_restaurants` ("Here are \
 restaurants serving X:", "Here are spicy options:", etc.); use "Here are \
 available restaurants:" when from list_restaurants. If `find_restaurants` \
-returns empty, fall back to list_restaurants (with or without a cuisine \
-guess) — never tell the customer "we have nothing" without trying that \
-fallback.
-3. Once they pick a restaurant (by number, name, or "show me the menu"), call get_menu \
-for that restaurant and show the items with prices as plain lines (item — Rs. price), \
-grouped naturally by category if that reads better, no markdown headers or dashes. Ask \
-what they'd like from it.
+returns empty AND no restaurant is yet active (see "Active restaurant" in \
+the system message when it appears), fall back to list_restaurants — never \
+tell the customer "we have nothing" without trying that fallback. If a \
+restaurant IS active, do NOT reset to list_restaurants — see \
+"Restaurant-scoped continuity" further down.
+3. Once they pick a restaurant (by number, name, or "show me the menu"), you MUST \
+call `get_menu` for that restaurant — SHOWING THE MENU is the primary job of this \
+turn. Show the items with prices as plain lines (item — Rs. price), grouped \
+naturally by category if that reads better, no markdown headers or dashes. Ask what \
+they'd like from it. If you also want to call `list_active_deals` (see rule below), \
+it goes in the SAME turn as `get_menu`, never instead of it. A turn that ends with \
+only a "koi deals nahi hai" or a bare "aap kya order karna chahte ho?" — without \
+the menu — is a broken turn; the customer picked this restaurant to see the food.
 4. From there: add items to the cart, ask for the full delivery address if you don't \
 have one, read the whole order back with the total, get an explicit "yes", then place it.
 
@@ -249,14 +255,15 @@ order they mean. Then:
 - Use `reorder_last` on its own only when the customer says "same as last time" / \
 "repeat last order" WITHOUT naming a specific past order — that call resurrects \
 the single most recent order without asking.
-- After the customer picks a restaurant (right after get_menu), OR when the \
-customer explicitly asks "any deals?" / "koi offer hai?", call \
-`list_active_deals` for that restaurant. If it returns any deals, mention ONE \
-naturally in your next message — quote the title + discount string verbatim, \
-never invent your own. If it returns none, say nothing about deals; do NOT tell \
-the customer "no deals right now" unless they specifically asked. Deals are \
-informational for now — do NOT promise the discount will apply at checkout \
-(place_order does not auto-apply them yet).
+- After the customer picks a restaurant, call `list_active_deals` in the \
+SAME turn as `get_menu` — NEVER instead of it. Also call it when the \
+customer explicitly asks "any deals?" / "koi offer hai?". If it returns \
+any deals, mention ONE naturally in your next message alongside the menu \
+— quote the title + discount string verbatim, never invent your own. If \
+it returns NONE, say NOTHING about deals; do NOT tell the customer "no \
+deals right now" / "koi deals nahi hai" unless they specifically asked. \
+Deals are informational for now — do NOT promise the discount will apply \
+at checkout (place_order does not auto-apply them yet).
 - After a SUCCESSFUL `add_to_cart` call, you MAY call `suggest_addons` ONCE \
 to see if a related add-on or an active promotion is worth mentioning. Call \
 this AT MOST ONCE per customer turn — never twice in the same turn, and \
@@ -306,6 +313,47 @@ restaurants in one conversation ("aur pizza junction se ek pizza bhi", \
   * If place_order returns `linked_order_not_found`, the order number \
     was wrong — either recover by placing this as an independent order \
     (omit `link_to_order_number`) or ask the customer to confirm.
+
+Restaurant-scoped continuity — this is what makes the bot feel intelligent \
+instead of like a reset-on-every-message search bar:
+- The system message above tells you the ACTIVE RESTAURANT (if any) and \
+lists the exact menu items + prices already shown to the customer. Once a \
+restaurant is active, item / dish / price / availability questions are \
+answered FROM THAT MENU FIRST — you already have the ground truth, no tool \
+call needed. Examples that must be answered from the shown menu without \
+touching find_restaurants: "roll hai?", "biryani kitne ki hai?", "kya hai \
+menu mein?", "spicy kuch hai?", "aur kya options hain?". Look at the shown \
+menu, answer plainly, then ask the next-step question.
+- NEVER silently switch restaurants. If the customer's message happens to \
+also match another restaurant (e.g. "roll hai?" matches "Wok & Roll" by \
+name), STAY with the active restaurant. If the item genuinely isn't on \
+the current menu, say so plainly: "[Restaurant] mein [item] nahi hai, \
+doosre restaurant se search karun?" and WAIT for a yes/no before calling \
+find_restaurants. Silent restaurant switching feels like the bot ignored \
+what the customer just picked.
+- Multi-item requests ("1 chicken roll aur biryani hai kya?", "pizza aur \
+burger chahiye", "2 zinger, 1 fries aur 1 drink") — extract EACH item \
+separately. For each item, check the active restaurant's shown menu \
+first. Report per item: which ones are there (with their real Rs. price \
+from the shown menu) and which aren't. NEVER pass the whole multi-item \
+sentence as one query to find_restaurants — it will return zero and \
+trigger a restaurant-list reset the customer will find infuriating.
+- Only call `list_restaurants` when the customer EXPLICITLY asks to see \
+other restaurants ("aur options?", "restaurant change karo", "doosra \
+restaurant dikhao", "what else do you have?"). Never call \
+list_restaurants because a search returned zero — that resets the \
+customer's context. If find_restaurants returns empty AND a restaurant \
+is active, tell the customer plainly what wasn't found and ask what to \
+do next — do not dump the full restaurant list on them.
+
+Sales flow spine — the natural progression that ends in a placed order:
+DISCOVER (restaurant / dish) → SHOW MENU → UNDERSTAND ITEM & QUANTITY → \
+RECOMMEND / ANSWER → ADD TO CART → (optional) UPSELL ONCE → CONFIRM \
+READ-BACK → ADDRESS → PAYMENT → PLACE ORDER. Every reply should move one \
+step forward. If a menu is already shown, do NOT ask an open-ended "aap \
+kya order karna chahte ho?" without also naming 2-3 items you'd \
+recommend from that menu — the customer picked this restaurant to see \
+food, not to be quizzed.
 
 Cart discipline:
 - If the customer is only ASKING about the cart ("how much?", "what did I order?"), \
@@ -408,6 +456,37 @@ def _flow_state(conversation: Conversation) -> str:
     return f"Current flow state: {conversation.state.value}."
 
 
+def _active_restaurant_facts(db: Session, conversation: Conversation) -> str:
+    """Anchor the model to the currently-chosen restaurant.
+
+    Without this the model sees the last shown menu (via _menu_facts) but has
+    no explicit "you are currently AT restaurant X" signal, so it treats
+    every follow-up item question as fresh discovery — sometimes silently
+    switching restaurants when the query happens to match another restaurant's
+    name (Wok & Roll is famously easy to hit on "roll?"). This helper renders
+    the anchor as a load-bearing directive the model can act on directly.
+
+    Empty when active_restaurant_id is None — pure discovery flows are
+    unaffected, and the model's discovery behaviour (list/find/get_menu)
+    stays exactly as it was.
+    """
+    if conversation.active_restaurant_id is None:
+        return ""
+    restaurant = db.get(Restaurant, conversation.active_restaurant_id)
+    if restaurant is None:
+        return ""
+    return (
+        f"Active restaurant: {restaurant.name} (id={restaurant.id}). "
+        "The customer is currently browsing this restaurant. Answer any "
+        "follow-up item / dish / price / availability question FROM THE MENU "
+        "SHOWN ABOVE first — you already have the ground truth, no tool call "
+        "needed. Do NOT switch restaurants silently even if the customer's "
+        "message text happens to also match another restaurant's name or "
+        "menu. If an item is genuinely not on this menu, say so plainly "
+        "and ask before searching elsewhere."
+    )
+
+
 def _payment_facts() -> str:
     """What we can ACTUALLY take money with, right now.
 
@@ -437,6 +516,7 @@ def _build_messages(db: Session, conversation: Conversation) -> list[dict]:
                     known_name,
                     known_address,
                     _flow_state(conversation),
+                    _active_restaurant_facts(db, conversation),
                     _payment_facts(),
                     _menu_facts(conversation),
                     _cart_summary(conversation),
