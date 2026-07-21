@@ -293,3 +293,97 @@ class TestOrderStatusTool:
         assert "error" in tools.get_order_status(
             db, other_conv, order_number=cod_order.order_number
         )
+
+
+class TestFindPastOrder:
+    """Turn "my last biryani" / "the office lunch" / "Eid order" into a specific
+    past order. Item-name matches, notes matches, customer isolation, ambiguity
+    handling — all pinned so a future refactor can't quietly loosen the privacy
+    scope or the ranking."""
+
+    def test_matches_by_item_name(self, db, conversation, cod_order):
+        # cod_order fixture places a Chicken Tikka Pizza — search for "pizza"
+        # must surface it.
+        result = tools.find_past_order(db, conversation, "pizza")
+        assert result["query"] == "pizza"
+        assert len(result["candidates"]) == 1
+        assert result["candidates"][0]["order_number"] == cod_order.order_number
+        assert any(
+            "pizza" in item["name"].lower()
+            for item in result["candidates"][0]["items"]
+        )
+
+    def test_matches_by_order_notes(self, db, conversation, cod_order):
+        # A restaurant might not have "eid" in an item name — the customer's
+        # own note is where a phrase-based memory lives.
+        cod_order.notes = "Eid dinner for family"
+        db.flush()
+
+        result = tools.find_past_order(db, conversation, "Eid")
+        assert len(result["candidates"]) == 1
+        assert result["candidates"][0]["order_number"] == cod_order.order_number
+        assert result["candidates"][0]["notes"] == "Eid dinner for family"
+
+    def test_case_insensitive(self, db, conversation, cod_order):
+        for term in ("PIZZA", "Pizza", "pIzZa"):
+            result = tools.find_past_order(db, conversation, term)
+            assert len(result["candidates"]) == 1, f"failed on {term!r}"
+
+    def test_no_match_returns_empty_with_note(self, db, conversation, cod_order):
+        result = tools.find_past_order(db, conversation, "chowmein")
+        assert result["candidates"] == []
+        assert "chowmein" in result["note"]
+
+    def test_empty_query_is_an_error(self, db, conversation):
+        assert "error" in tools.find_past_order(db, conversation, "")
+        assert "error" in tools.find_past_order(db, conversation, "   ")
+
+    def test_only_this_customer_sees_their_orders(self, db, cod_order):
+        """Privacy boundary — another customer's search must NEVER surface
+        this order, even with a keyword that would obviously match its items."""
+        from app.services import conversations as convo
+
+        other = convo.get_or_create_customer(db, "923009999999")
+        other_conv = convo.get_or_create_conversation(db, other)
+        db.flush()
+
+        result = tools.find_past_order(db, other_conv, "pizza")
+        assert result["candidates"] == []
+
+    def test_multiple_matches_return_newest_first(
+        self, db, conversation, cart_with_pizza, pizza, menu_item
+    ):
+        """Two orders for this customer, both with pizza — the newest one must
+        come first so the model can lead with 'was this last Tuesday's order?'."""
+        first = tools.place_order(
+            db, cart_with_pizza, delivery_address="House 1, Lahore"
+        )
+        db.flush()
+
+        # Rebuild the cart and place a second pizza order.
+        tools.get_menu(db, cart_with_pizza, restaurant_id=pizza.id)
+        tools.add_to_cart(db, cart_with_pizza, menu_item_id=menu_item.id, quantity=1)
+        second = tools.place_order(
+            db, cart_with_pizza, delivery_address="House 2, Lahore"
+        )
+        db.flush()
+
+        result = tools.find_past_order(db, cart_with_pizza, "pizza")
+        assert len(result["candidates"]) == 2
+        # Newest-first ordering — the second call placed the more recent order.
+        assert result["candidates"][0]["order_number"] == second["order_number"]
+        assert result["candidates"][1]["order_number"] == first["order_number"]
+
+    def test_result_shape_is_stable(self, db, conversation, cod_order):
+        """Contract the model relies on — if these field names change the
+        prompt guidance needs to change with them."""
+        result = tools.find_past_order(db, conversation, "pizza")
+        candidate = result["candidates"][0]
+        for field in (
+            "order_number", "restaurant", "restaurant_id",
+            "placed_at", "total", "status", "notes", "items",
+        ):
+            assert field in candidate, f"missing {field!r} in candidate shape"
+        assert isinstance(candidate["items"], list)
+        assert "name" in candidate["items"][0]
+        assert "quantity" in candidate["items"][0]

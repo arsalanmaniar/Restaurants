@@ -232,6 +232,37 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "find_past_order",
+            "description": (
+                "Search this customer's own past orders for a keyword the customer just "
+                "used — an item name (e.g. 'biryani', 'zinger'), a restaurant, or a "
+                "phrase from their own order notes (e.g. 'Eid', 'office lunch'). Use "
+                "this WHENEVER the customer references a specific past order in words, "
+                "before calling reorder_last. Returns 0-5 candidate orders newest-first "
+                "with items, totals, and the placed_at date. If exactly one candidate "
+                "comes back, confirm it with the customer and then reorder. If more "
+                "than one, ask a clarifying question (mention the two most recent). If "
+                "none, offer to build a fresh order — never guess."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "One keyword or short phrase from the customer's own words: "
+                            "an item name, a restaurant, or a snippet from their past "
+                            "order notes."
+                        ),
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "reorder_last",
             "description": (
                 "Rebuild the cart from the customer's most recent order, e.g. 'order the "

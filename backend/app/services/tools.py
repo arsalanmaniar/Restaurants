@@ -788,6 +788,94 @@ def list_favorites(db: Session, conversation: Conversation) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Past-order search (memory / phrase-driven repeat)
+# --------------------------------------------------------------------------- #
+
+
+MAX_PAST_ORDER_CANDIDATES = 5
+
+
+def find_past_order(
+    db: Session, conversation: Conversation, query: str
+) -> dict:
+    """Look up this customer's OWN past orders for a keyword match.
+
+    Purpose: turn phrases like "my last biryani", "the Eid order", "same as
+    office lunch" into a specific past order the model can then reorder or
+    quote. Matches ILIKE against `Order.notes` (free-text) and the item names
+    on that order — everything the customer might reference.
+
+    Returns up to MAX_PAST_ORDER_CANDIDATES orders newest-first. The model is
+    expected to:
+      - use `reorder_last`-style rebuild logic if exactly one candidate comes
+        back (or ask the customer to confirm the exact order number first),
+      - ask a clarifying question if 2+ candidates come back, and
+      - offer to build a fresh order if 0 candidates come back.
+
+    Never returns other customers' orders — scoped strictly to
+    `conversation.customer_id`. That scoping is the ONLY privacy boundary and
+    must never be relaxed.
+    """
+    trimmed = (query or "").strip()
+    if not trimmed:
+        return {"error": "Give a word from the past order to search for."}
+
+    like = f"%{trimmed}%"
+
+    # DISTINCT on order id — an order matching by both notes and an item name
+    # would otherwise appear twice.
+    order_ids = db.scalars(
+        select(Order.id)
+        .outerjoin(OrderItem, OrderItem.order_id == Order.id)
+        .where(
+            Order.customer_id == conversation.customer_id,
+            (Order.notes.ilike(like)) | (OrderItem.item_name.ilike(like)),
+        )
+        .order_by(Order.id.desc())
+        .distinct()
+        .limit(MAX_PAST_ORDER_CANDIDATES)
+    ).all()
+
+    if not order_ids:
+        return {
+            "query": trimmed,
+            "candidates": [],
+            "note": (
+                f"No past order matches '{trimmed}'. Ask what the customer wants "
+                "instead, or offer to start a fresh order."
+            ),
+        }
+
+    # Second query for the full rows — keeps the DISTINCT-limit correct and lets
+    # SQLAlchemy load items/restaurant relationships eagerly per candidate.
+    orders = db.scalars(
+        select(Order)
+        .where(Order.id.in_(order_ids))
+        .order_by(Order.id.desc())
+    ).all()
+
+    return {
+        "query": trimmed,
+        "candidates": [
+            {
+                "order_number": o.order_number,
+                "restaurant": o.restaurant.name,
+                "restaurant_id": o.restaurant_id,
+                "placed_at": o.placed_at.isoformat(),
+                "total": _money(o.total_amount),
+                "status": o.status.value,
+                "notes": o.notes,
+                "items": [
+                    {"name": i.item_name, "quantity": i.quantity}
+                    for i in o.items
+                ],
+            }
+            for o in orders
+        ],
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Reorder last order
 # --------------------------------------------------------------------------- #
 
@@ -897,6 +985,7 @@ TOOL_IMPLS = {
     "clear_cart": clear_cart,
     "place_order": place_order,
     "get_order_status": get_order_status,
+    "find_past_order": find_past_order,
     "add_favorite": add_favorite,
     "remove_favorite": remove_favorite,
     "list_favorites": list_favorites,
