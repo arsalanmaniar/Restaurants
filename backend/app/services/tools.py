@@ -20,6 +20,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import settings
 from app.services import coupons as coupons_service
+from app.services import discovery as discovery_service
 from app.services import promotions as promotions_service
 from app.services import ranking
 from app.services import upsell as upsell_service
@@ -200,6 +201,72 @@ def search_restaurants_by_item(
         "query": query,
         "restaurants": [
             {**matches[rr.restaurant.id], "ranking_note": rr.reason}
+            for rr in ranked
+        ],
+    }
+
+
+def find_restaurants(
+    db: Session, conversation: Conversation, query: str
+) -> dict:
+    """Intent-based discovery — one tool that turns almost any customer
+    phrasing ("pizza chahiye", "something spicy", "chinese", "family
+    dinner") into a ranked shortlist of open restaurants.
+
+    Searches five columns at once: restaurant name, cuisine, description,
+    menu item name, menu item description. Ranking is exactly the same
+    Phase 2 formula (`ranking.rank_restaurants`) that list_restaurants /
+    search_restaurants_by_item use — no per-tool ordering divergence.
+
+    Preferred over `search_restaurants_by_item` (which only searches
+    MenuItem.name — a strict subset of what this covers). The older tool is
+    kept callable for backward compatibility but its schema description
+    now flags it as deprecated.
+    """
+    trimmed = (query or "").strip()
+    if not trimmed:
+        return {
+            "error": "empty_query",
+            "message": (
+                "Give me a keyword or short phrase from the customer's own words — "
+                "a dish, cuisine, style, or intent. Do not call this with an empty query."
+            ),
+        }
+
+    restaurants, matched_items = discovery_service.find_matching_restaurants(
+        db, trimmed,
+    )
+
+    if not restaurants:
+        return {
+            "query": trimmed,
+            "restaurants": [],
+            "note": (
+                f"No open restaurant matches '{trimmed}'. Fall back to "
+                "list_restaurants and offer whatever is available — never tell "
+                "the customer 'we have nothing' without offering the full list."
+            ),
+        }
+
+    ranked = ranking.rank_restaurants(
+        db,
+        list(restaurants.values()),
+        matched_items_by_id=matched_items,
+    )[:20]
+
+    return {
+        "query": trimmed,
+        "restaurants": [
+            {
+                "id": rr.restaurant.id,
+                "name": rr.restaurant.name,
+                "cuisine": rr.restaurant.cuisine_type,
+                # matched_items are truthful, quotable strings — real menu item
+                # names when the query matched a menu row, or the restaurant's
+                # cuisine text when it only matched at the restaurant level.
+                "matched_items": matched_items.get(rr.restaurant.id, []),
+                "ranking_note": rr.reason,
+            }
             for rr in ranked
         ],
     }
@@ -1135,6 +1202,7 @@ def reorder_last(db: Session, conversation: Conversation) -> dict:
 TOOL_IMPLS = {
     "list_restaurants": list_restaurants,
     "search_restaurants_by_item": search_restaurants_by_item,
+    "find_restaurants": find_restaurants,
     "get_menu": get_menu,
     "list_active_deals": list_active_deals,
     "suggest_addons": suggest_addons,

@@ -30,10 +30,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_restaurants_by_item",
             "description": (
-                "Find open restaurants whose menu has an item matching a dish name, "
-                "e.g. 'biryani', 'pizza', 'chowmein'. Call this as soon as the customer "
-                "says what they want to eat, BEFORE asking them to pick a restaurant — "
-                "never guess which restaurants serve something."
+                "DEPRECATED — prefer `find_restaurants`, which is a strict "
+                "superset (searches restaurant name/cuisine/description AND "
+                "menu item name/description, not just item names). Kept "
+                "callable for backward compatibility; do not call it for new "
+                "discovery flows."
             ),
             "parameters": {
                 "type": "object",
@@ -41,6 +42,40 @@ TOOL_SCHEMAS = [
                     "query": {
                         "type": "string",
                         "description": "The dish or food keyword the customer said, e.g. 'chicken biryani'.",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_restaurants",
+            "description": (
+                "Intent-based discovery — one tool for almost every 'what do "
+                "you have?' style query. Call this whenever the customer "
+                "names a dish ('biryani', 'pizza chahiye'), a cuisine "
+                "('chinese', 'desi'), a style ('something spicy', 'light "
+                "dinner', 'family meal'), or any topical phrase, BEFORE "
+                "asking them to pick a restaurant. Searches restaurant name, "
+                "cuisine, description, menu item name AND menu item "
+                "description in one go — so 'chinese' finds Wok & Roll even "
+                "though no menu item literally contains the word 'chinese'. "
+                "Returns ranked, open restaurants with matched_items (real "
+                "menu names when available, otherwise the cuisine text). If "
+                "it returns zero, fall back to list_restaurants rather than "
+                "telling the customer 'we have nothing'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "A keyword or short phrase from the customer's own "
+                            "words — dish, cuisine, style, or intent."
+                        ),
                     }
                 },
                 "required": ["query"],
