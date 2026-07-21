@@ -260,6 +260,23 @@ TOOL_SCHEMAS = [
                             "Omit if they did not mention a code — never invent one."
                         ),
                     },
+                    "link_to_order_number": {
+                        "type": "string",
+                        "description": (
+                            "Optional. Order number of a PREVIOUS order in "
+                            "this same conversation that the customer wants "
+                            "this order LINKED to (e.g. 'AB-4F2K9C'). Use "
+                            "ONLY when the customer explicitly wants a "
+                            "second order from a different restaurant in "
+                            "the same session ('aur pizza junction se bhi', "
+                            "'and add a biryani from Karachi Biryani'). "
+                            "The two orders stay independent (own delivery, "
+                            "own payment, own status) but share an "
+                            "order_group_id so support and dashboards can "
+                            "see they belong together. Omit for standalone "
+                            "orders — this is NOT the default."
+                        ),
+                    },
                 },
                 "required": ["payment_method"],
             },

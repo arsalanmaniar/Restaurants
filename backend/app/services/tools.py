@@ -804,10 +804,37 @@ def place_order(
     payment_method: str = "cod",
     notes: str | None = None,
     coupon_code: str | None = None,
+    link_to_order_number: str | None = None,
 ) -> dict:
     lines = list((conversation.cart or {}).get("items", []))
     if not lines:
         return {"error": "The cart is empty — nothing to order."}
+
+    # Phase 7 — sequential linked orders. If the model passes a
+    # link_to_order_number, resolve the parent order eagerly so we can
+    # (a) fail early with a clear error the model can recover from, and
+    # (b) reuse or mint the shared group id before we create the child.
+    # Customer-scoped: a customer cannot link to another customer's order
+    # even by guessing the number. Never relaxes the cart's cross-restaurant
+    # guard — that stays firm; linking is purely a POST-place_order label.
+    parent_for_link: Order | None = None
+    if link_to_order_number:
+        parent_for_link = db.scalar(
+            select(Order).where(
+                Order.customer_id == conversation.customer_id,
+                Order.order_number == link_to_order_number.strip().upper(),
+            )
+        )
+        if parent_for_link is None:
+            return {
+                "error": "linked_order_not_found",
+                "message": (
+                    f"No previous order {link_to_order_number!r} for this "
+                    "customer. Place this order as an independent order (omit "
+                    "link_to_order_number), or confirm the correct order "
+                    "number before retrying."
+                ),
+            }
 
     # Guard against the "silent cod default" pattern: when there are multiple
     # payment methods on offer and the model picks cod without ever asking
@@ -946,6 +973,20 @@ def place_order(
         commission_amount=commission_amount,
         notes=notes,
     )
+
+    # Apply the link BEFORE db.flush() so the child row lands with its
+    # group id already set — no second UPDATE needed, one atomic write.
+    if parent_for_link is not None:
+        if parent_for_link.order_group_id:
+            # Third-or-later linked order: reuse the existing group id.
+            order.order_group_id = parent_for_link.order_group_id
+        else:
+            # First link between two previously-independent orders: mint a
+            # new group and back-fill the parent so both rows carry the
+            # same identifier and dashboards can group them.
+            group_id = f"GRP-{secrets.token_hex(3).upper()}"
+            parent_for_link.order_group_id = group_id
+            order.order_group_id = group_id
     order.items = [
         OrderItem(
             menu_item_id=line["menu_item_id"],
@@ -995,6 +1036,14 @@ def place_order(
     }
     if applied_coupon is not None:
         result["coupon_code"] = applied_coupon.code
+    if order.order_group_id is not None:
+        # Surface the group id so the model can confirm to the customer
+        # ("your two orders are linked as GRP-XXXXXX") — matches how the
+        # dashboards will group them.
+        result["order_group_id"] = order.order_group_id
+        result["linked_to_order_number"] = (
+            parent_for_link.order_number if parent_for_link else None
+        )
 
     if not prepaid:
         return result

@@ -76,6 +76,14 @@ class Order(Base, TimestampMixin):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
+    # NULL for single-restaurant orders (the common case). Populated when
+    # the customer explicitly linked this order to a previous one via
+    # place_order's `link_to_order_number` param — see services/tools.py.
+    # All orders in one conversation that share this id are "linked" for
+    # dashboard grouping; they remain fully independent otherwise (own
+    # totals, own payments, own status transitions).
+    order_group_id: Mapped[str | None] = mapped_column(String(32), index=True)
+
     customer: Mapped["Customer"] = relationship(back_populates="orders")  # noqa: F821
     restaurant: Mapped["Restaurant"] = relationship(back_populates="orders")  # noqa: F821
     items: Mapped[list["OrderItem"]] = relationship(

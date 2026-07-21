@@ -105,6 +105,11 @@ class OrderOut(ORMModel):
     notes: str | None
     placed_at: datetime
     items: list[OrderItemOut]
+    # Populated only when this order was linked to another via
+    # place_order(link_to_order_number=...). Restaurant + admin dashboards
+    # use it to visually group linked orders — restaurants only see the
+    # marker on their own order (never sibling orders at other tenants).
+    order_group_id: str | None = None
 
 
 class OrderWithRestaurantOut(OrderOut):
