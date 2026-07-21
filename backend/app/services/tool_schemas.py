@@ -79,6 +79,37 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_active_deals",
+            "description": (
+                "Check whether a restaurant has any promotional deals running RIGHT "
+                "NOW (e.g. '20% off biryani this weekend', 'Rs. 500 off orders over "
+                "Rs. 2000'). Use this when the customer picks a restaurant, or asks "
+                "'any deals?', or when a deal would be relevant marketing (e.g. after "
+                "showing the menu, mention any active deal once). Returns 0-N deals "
+                "with a title, human-readable discount string, and the date window. "
+                "The deal is informational — quote the title and discount verbatim, "
+                "but don't promise a specific price at checkout (the discount is not "
+                "yet auto-applied at place_order)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "restaurant_id": {
+                        "type": "string",
+                        "description": "The restaurant's id from list_restaurants.",
+                    },
+                    "restaurant_name": {
+                        "type": "string",
+                        "description": "The restaurant's name, e.g. 'Pizza Junction'.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "add_to_cart",
             "description": (
                 "Add one menu item to the customer's cart. Call once per distinct item. "

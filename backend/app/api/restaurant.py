@@ -33,6 +33,9 @@ from app.schemas import (
     MenuItemPatch,
     OrderOut,
     OrderStatusUpdate,
+    PromotionIn,
+    PromotionOut,
+    PromotionPatch,
     RatingOut,
     RatingSummary,
     ReportOut,
@@ -42,6 +45,8 @@ from app.schemas import (
     WorkingHoursPeriod,
     WorkingHoursReplace,
 )
+from app.models import Promotion
+from app.services import promotions as promotions_service
 from app.services import reports as reports_service
 from app.services.opening_hours import is_open
 
@@ -459,3 +464,94 @@ def my_report(
     except reports_service.ReportRangeError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     return ReportOut(**vars(data))
+
+
+# --------------------------------------------------------------------------- #
+# Promotions (own restaurant only)
+# --------------------------------------------------------------------------- #
+
+
+def _my_promotion(db: DbSession, promo_id: int, restaurant_id: int) -> Promotion:
+    """Load the promotion but only if it belongs to the caller's restaurant.
+    The `restaurant_id == principal.restaurant_id` scope is the ONLY tenant
+    boundary here — a staff member at restaurant A must never mutate a promo
+    at restaurant B by guessing its id."""
+    promo = db.get(Promotion, promo_id)
+    if promo is None or promo.restaurant_id != restaurant_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Promotion not found.")
+    return promo
+
+
+@router.get("/promotions", response_model=list[PromotionOut])
+def list_my_promotions(principal: CurrentStaff, db: DbSession) -> list[Promotion]:
+    """Every promotion for the caller's restaurant, active or not — the dashboard
+    lists past + future too so the owner can revive an expired campaign."""
+    rows = db.scalars(
+        select(Promotion)
+        .where(Promotion.restaurant_id == principal.restaurant_id)
+        .order_by(Promotion.id.desc())
+    ).all()
+    return list(rows)
+
+
+@router.post(
+    "/promotions",
+    response_model=PromotionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_promotion(
+    payload: PromotionIn, principal: CurrentStaff, db: DbSession,
+) -> Promotion:
+    try:
+        promotions_service.validate_new_promotion(
+            title=payload.title,
+            discount_value=payload.discount_value,
+            valid_from=payload.valid_from,
+            valid_to=payload.valid_to,
+            min_order_amount=payload.min_order_amount,
+            max_discount_amount=payload.max_discount_amount,
+        )
+    except promotions_service.PromotionError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+    promo = Promotion(
+        restaurant_id=principal.restaurant_id,
+        **payload.model_dump(),
+    )
+    db.add(promo)
+    db.flush()
+    return promo
+
+
+@router.patch("/promotions/{promo_id}", response_model=PromotionOut)
+def update_promotion(
+    promo_id: int,
+    payload: PromotionPatch,
+    principal: CurrentStaff,
+    db: DbSession,
+) -> Promotion:
+    promo = _my_promotion(db, promo_id, principal.restaurant_id)
+    updates = payload.model_dump(exclude_unset=True)
+
+    # If the caller is changing dates, re-check the range against whatever's
+    # not being changed — otherwise a lone valid_from bump could sneak past
+    # the model-level CheckConstraint until the flush.
+    new_from = updates.get("valid_from", promo.valid_from)
+    new_to = updates.get("valid_to", promo.valid_to)
+    if new_from > new_to:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "valid_from cannot be after valid_to.",
+        )
+
+    for field, value in updates.items():
+        setattr(promo, field, value)
+    db.flush()
+    return promo
+
+
+@router.delete("/promotions/{promo_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_promotion(promo_id: int, principal: CurrentStaff, db: DbSession) -> None:
+    promo = _my_promotion(db, promo_id, principal.restaurant_id)
+    db.delete(promo)
+    db.flush()

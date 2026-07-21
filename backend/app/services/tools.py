@@ -20,6 +20,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import settings
 from app.services import coupons as coupons_service
+from app.services import promotions as promotions_service
 from app.services import ranking
 from app.services.opening_hours import is_open
 from app.services.payments.registry import available_methods, provider_for_method
@@ -306,6 +307,73 @@ def get_menu(
             for i in items
         ],
     }
+
+
+def list_active_deals(
+    db: Session,
+    conversation: Conversation,
+    restaurant_id: int | str | None = None,
+    restaurant_name: str | None = None,
+) -> dict:
+    """Currently-running promotions for one restaurant.
+
+    Returns a customer-friendly summary the model can mention naturally — a
+    title, human-readable discount string, and the date window. Never returns
+    a promotion whose window has expired or which the restaurant staff
+    manually deactivated (see services/promotions.py::is_active_at).
+
+    Restaurant is identified by id OR name, same shape as get_menu / add_favorite,
+    so the model can pass whichever it has. For MVP the deals are INFORMATIONAL —
+    place_order does not auto-apply them yet, so the model should quote the
+    deal as marketing, not promise a specific discount at checkout.
+    """
+    restaurant = _resolve_restaurant(db, restaurant_id, restaurant_name)
+    if restaurant is None:
+        return {
+            "error": "unknown_restaurant",
+            "message": (
+                "No restaurant matched that. Call list_restaurants and use an "
+                "id or name from the result."
+            ),
+        }
+
+    promotions = promotions_service.list_active_for_restaurant(db, restaurant.id)
+
+    return {
+        "restaurant": {"id": restaurant.id, "name": restaurant.name},
+        "deals": [
+            {
+                "title": p.title,
+                "description": p.description,
+                "discount": _format_discount(p),
+                # ISO dates so the model can quote them verbatim if the customer
+                # asks "how long is this deal on?" — no clever date arithmetic.
+                "valid_from": p.valid_from.isoformat(),
+                "valid_to": p.valid_to.isoformat(),
+                # A populated list means the deal is on specific items only,
+                # not the whole menu — the model should say so.
+                "applies_to_specific_items": bool(p.applicable_menu_item_ids),
+            }
+            for p in promotions
+        ],
+    }
+
+
+def _format_discount(promo) -> str:
+    """Customer-readable discount string — 'Rs. 500 off' or '20% off (up to Rs. 500)'.
+    The model may quote this verbatim; the price effect at place_order is a
+    separate follow-up so this is marketing copy only, no math guarantee."""
+    from app.models import CouponDiscountType
+
+    if promo.discount_type == CouponDiscountType.FIXED:
+        return f"Rs. {promo.discount_value:.0f} off"
+    # PERCENTAGE
+    cap = (
+        f" (up to Rs. {promo.max_discount_amount:.0f})"
+        if promo.max_discount_amount is not None
+        else ""
+    )
+    return f"{promo.discount_value:.0f}% off{cap}"
 
 
 def add_to_cart(
@@ -1007,6 +1075,7 @@ TOOL_IMPLS = {
     "list_restaurants": list_restaurants,
     "search_restaurants_by_item": search_restaurants_by_item,
     "get_menu": get_menu,
+    "list_active_deals": list_active_deals,
     "add_to_cart": add_to_cart,
     "clear_cart": clear_cart,
     "place_order": place_order,

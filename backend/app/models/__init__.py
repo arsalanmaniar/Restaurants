@@ -20,6 +20,7 @@ from app.models.menu import MenuCategory, MenuItem
 from app.models.operations import OrderRating, RestaurantWorkingHours, SubscriptionPlan
 from app.models.order import Order, OrderItem, OrderStatusHistory
 from app.models.payment import Payment
+from app.models.promotion import Promotion
 from app.models.refund import Refund
 from app.models.restaurant import AdminUser, Restaurant, RestaurantStaff
 
@@ -48,6 +49,7 @@ __all__ = [
     "PaymentMethod",
     "PaymentProviderName",
     "PaymentStatus",
+    "Promotion",
     "Refund",
     "RefundStatus",
     "Restaurant",

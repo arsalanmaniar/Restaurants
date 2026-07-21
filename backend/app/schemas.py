@@ -485,3 +485,81 @@ class ReportOut(BaseModel):
     pickup_count: int
     top_categories: list[ReportCategoryOut]
     top_items: list[ReportItemOut]
+
+
+# --------------------------------------------------------------------------- #
+# Promotions (restaurant-run time-bound deals — distinct from Coupon)
+# --------------------------------------------------------------------------- #
+
+
+class PromotionIn(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    description: str | None = None
+    discount_type: CouponDiscountType
+    discount_value: Decimal = Field(gt=0)
+    # Empty list ⇒ promotion applies to the whole menu.
+    applicable_menu_item_ids: list[int] = Field(default_factory=list)
+    min_order_amount: Decimal = Field(default=Decimal("0.00"), ge=0)
+    max_discount_amount: Decimal | None = Field(default=None, gt=0)
+    valid_from: date
+    valid_to: date
+    is_active: bool = True
+
+    @model_validator(mode="after")
+    def _check(self) -> "PromotionIn":
+        if (
+            self.discount_type == CouponDiscountType.PERCENTAGE
+            and self.discount_value > 100
+        ):
+            raise ValueError("A percentage discount cannot exceed 100")
+        if self.valid_to < self.valid_from:
+            raise ValueError("valid_to cannot be before valid_from")
+        return self
+
+
+class PromotionPatch(BaseModel):
+    """All-optional. The restaurant's dashboard typically flips is_active or
+    edits the date window; other fields are here for completeness."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    discount_type: CouponDiscountType | None = None
+    discount_value: Decimal | None = Field(default=None, gt=0)
+    applicable_menu_item_ids: list[int] | None = None
+    min_order_amount: Decimal | None = Field(default=None, ge=0)
+    max_discount_amount: Decimal | None = Field(default=None, gt=0)
+    valid_from: date | None = None
+    valid_to: date | None = None
+    is_active: bool | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> "PromotionPatch":
+        if (
+            self.discount_type == CouponDiscountType.PERCENTAGE
+            and self.discount_value is not None
+            and self.discount_value > 100
+        ):
+            raise ValueError("A percentage discount cannot exceed 100")
+        if (
+            self.valid_from is not None
+            and self.valid_to is not None
+            and self.valid_to < self.valid_from
+        ):
+            raise ValueError("valid_to cannot be before valid_from")
+        return self
+
+
+class PromotionOut(ORMModel):
+    id: int
+    restaurant_id: int
+    title: str
+    description: str | None
+    discount_type: CouponDiscountType
+    discount_value: Decimal
+    applicable_menu_item_ids: list[int]
+    min_order_amount: Decimal
+    max_discount_amount: Decimal | None
+    valid_from: date
+    valid_to: date
+    is_active: bool
+    created_at: datetime

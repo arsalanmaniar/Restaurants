@@ -241,6 +241,14 @@ order they mean. Then:
 - Use `reorder_last` on its own only when the customer says "same as last time" / \
 "repeat last order" WITHOUT naming a specific past order — that call resurrects \
 the single most recent order without asking.
+- After the customer picks a restaurant (right after get_menu), OR when the \
+customer explicitly asks "any deals?" / "koi offer hai?", call \
+`list_active_deals` for that restaurant. If it returns any deals, mention ONE \
+naturally in your next message — quote the title + discount string verbatim, \
+never invent your own. If it returns none, say nothing about deals; do NOT tell \
+the customer "no deals right now" unless they specifically asked. Deals are \
+informational for now — do NOT promise the discount will apply at checkout \
+(place_order does not auto-apply them yet).
 
 Cart discipline:
 - If the customer is only ASKING about the cart ("how much?", "what did I order?"), \
