@@ -110,6 +110,25 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "suggest_addons",
+            "description": (
+                "Get ONE contextual upsell for the cart's current restaurant, or "
+                "nothing. Call this right after a successful add_to_cart, at most "
+                "ONCE per customer turn — never twice in the same turn, never "
+                "before the cart has any items. Response has a `suggestion_type`: "
+                "'promotion' means an active restaurant deal you should mention "
+                "(quote the title + discount verbatim, do not promise a checkout "
+                "price); 'addon' means a complementary menu item you should offer "
+                "as a light nudge like 'want some Loaded Fries with that?'; "
+                "'none' means say nothing about upsells — do NOT invent something. "
+                "Never suggest twice in a row if the customer has already declined."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "add_to_cart",
             "description": (
                 "Add one menu item to the customer's cart. Call once per distinct item. "

@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.services import coupons as coupons_service
 from app.services import promotions as promotions_service
 from app.services import ranking
+from app.services import upsell as upsell_service
 from app.services.opening_hours import is_open
 from app.services.payments.registry import available_methods, provider_for_method
 from app.services.payments.service import start_payment
@@ -32,6 +33,12 @@ from app.models import (
     CustomerFavorite,
     MenuCategory,
     MenuItem,
+    # Referenced by _model_has_asked_payment / _has_any_outbound below; the
+    # guard was added in commit 04d2f3d without this import, so any real
+    # conversation (which always has OUTBOUNDs) would NameError on the first
+    # place_order with multiple payment methods on. Tests never seeded an
+    # OUTBOUND before place_order, so the bug went undetected.
+    MessageDirection,
     PaymentMethod,
     Order,
     OrderItem,
@@ -374,6 +381,60 @@ def _format_discount(promo) -> str:
         else ""
     )
     return f"{promo.discount_value:.0f}% off{cap}"
+
+
+def suggest_addons(db: Session, conversation: Conversation) -> dict:
+    """One contextual upsell for the customer's current cart, at most.
+
+    Returns a `suggestion_type` of "promotion" | "addon" | "none":
+      * "promotion" — mention the promo verbatim (quote the title + discount).
+      * "addon"     — mention as a light nudge ("want some Loaded Fries with that?").
+      * "none"      — say nothing. Do NOT invent something to suggest.
+
+    Priority is promotion > addon > none — see services/upsell.py. The
+    "at most one per turn" rule is a joint contract: this tool ALWAYS
+    returns at most one suggestion (structural), and the prompt tells the
+    model to call this at most once per customer turn (behavioural).
+    """
+    restaurant_id = cart_restaurant(conversation)
+    if restaurant_id is None:
+        return {
+            "suggestion_type": "none",
+            "note": (
+                "Cart is empty — nothing to upsell yet. Do not fabricate a "
+                "suggestion; just carry on with the order flow."
+            ),
+        }
+
+    restaurant = db.get(Restaurant, restaurant_id)
+    if restaurant is None:
+        return {"suggestion_type": "none"}
+
+    lines = (conversation.cart or {}).get("items", [])
+    cart_item_ids = [int(line["menu_item_id"]) for line in lines]
+
+    pick = upsell_service.pick_for_cart(db, restaurant.id, cart_item_ids)
+
+    payload = {
+        "restaurant": {"id": restaurant.id, "name": restaurant.name},
+        "suggestion_type": pick.kind,
+    }
+    if pick.kind == "promotion":
+        p = pick.promotion
+        payload["promotion"] = {
+            "title": p.title,
+            "discount": _format_discount(p),
+            "valid_to": p.valid_to.isoformat(),
+        }
+    elif pick.kind == "addon":
+        a = pick.addon
+        payload["addon"] = {
+            "id": a.id,
+            "name": a.name,
+            "price": _money(a.price),
+            "category": a.category.name if a.category else None,
+        }
+    return payload
 
 
 def add_to_cart(
@@ -1076,6 +1137,7 @@ TOOL_IMPLS = {
     "search_restaurants_by_item": search_restaurants_by_item,
     "get_menu": get_menu,
     "list_active_deals": list_active_deals,
+    "suggest_addons": suggest_addons,
     "add_to_cart": add_to_cart,
     "clear_cart": clear_cart,
     "place_order": place_order,
