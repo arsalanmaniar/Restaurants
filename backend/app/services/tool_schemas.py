@@ -65,7 +65,16 @@ TOOL_SCHEMAS = [
                 "Returns ranked, open restaurants with matched_items (real "
                 "menu names when available, otherwise the cuisine text). If "
                 "it returns zero, fall back to list_restaurants rather than "
-                "telling the customer 'we have nothing'."
+                "telling the customer 'we have nothing'.\n\n"
+                "When the customer mentions a budget (e.g. 'Rs. 1500 mein', "
+                "'under 1000', 'budget 800') OR a party size (e.g. '6 logo "
+                "ke liye', 'family of 4'), pass `budget` and `party_size` "
+                "too — the response will then include a per-restaurant "
+                "`estimate` (cheapest matched item × party_size + delivery, "
+                "clamped to the restaurant's minimum order) and a "
+                "`fits_budget` flag. If NOTHING fits, a top-level `note` "
+                "tells you the cheapest option; quote that honestly and "
+                "offer to raise the budget — never pretend an option fits."
             ),
             "parameters": {
                 "type": "object",
@@ -74,11 +83,29 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": (
                             "A keyword or short phrase from the customer's own "
-                            "words — dish, cuisine, style, or intent."
+                            "words — dish, cuisine, style, or intent. Optional "
+                            "ONLY when `budget` is also set (bare-budget query)."
                         ),
-                    }
+                    },
+                    "budget": {
+                        "type": "number",
+                        "description": (
+                            "Optional. Total budget in Pakistani Rupees the "
+                            "customer mentioned, e.g. 1500 for 'Rs. 1500 mein "
+                            "kya milega' or 'under 1500'. The estimate this "
+                            "is compared against INCLUDES delivery fee."
+                        ),
+                    },
+                    "party_size": {
+                        "type": "integer",
+                        "description": (
+                            "Optional. Number of people if the customer "
+                            "mentioned it — '6 logo ke liye' → 6, 'family of "
+                            "4' → 4, 'mere aur meri behen' → 2. Defaults to 1."
+                        ),
+                    },
                 },
-                "required": ["query"],
+                "required": [],
             },
         },
     },

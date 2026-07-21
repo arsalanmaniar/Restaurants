@@ -207,35 +207,85 @@ def search_restaurants_by_item(
 
 
 def find_restaurants(
-    db: Session, conversation: Conversation, query: str
+    db: Session,
+    conversation: Conversation,
+    query: str = "",
+    budget: float | int | str | None = None,
+    party_size: int | None = None,
 ) -> dict:
     """Intent-based discovery — one tool that turns almost any customer
     phrasing ("pizza chahiye", "something spicy", "chinese", "family
-    dinner") into a ranked shortlist of open restaurants.
+    dinner", "1500 mein kya milega") into a ranked shortlist of open
+    restaurants, with an optional budget-fit assessment per restaurant.
 
-    Searches five columns at once: restaurant name, cuisine, description,
-    menu item name, menu item description. Ranking is exactly the same
-    Phase 2 formula (`ranking.rank_restaurants`) that list_restaurants /
-    search_restaurants_by_item use — no per-tool ordering divergence.
+    Searches five columns at once (restaurant name, cuisine, description,
+    menu item name, menu item description). Ranking uses the same Phase 2
+    formula (`ranking.rank_restaurants`) that the older tools use.
 
-    Preferred over `search_restaurants_by_item` (which only searches
-    MenuItem.name — a strict subset of what this covers). The older tool is
-    kept callable for backward compatibility but its schema description
-    now flags it as deprecated.
+    Optional `budget` (in Rs) + `party_size` add a per-restaurant `estimate`
+    with `estimated_total` (cheapest matched item × party_size + delivery,
+    clamped to the restaurant's minimum order amount) and a `fits_budget`
+    boolean. When NOTHING fits, a top-level `note` guides the model to
+    offer to broaden the budget rather than pretend an option fits.
+
+    `query` is optional ONLY when `budget` is set — a bare budget without
+    any cuisine hint ("1000 mein kya milega") is a real customer question;
+    without a query we list every open restaurant and estimate against
+    each one's cheapest item.
     """
     trimmed = (query or "").strip()
-    if not trimmed:
+
+    # Parse budget defensively — the model has been observed sending
+    # numbers-as-strings ("1500") when the schema declares number.
+    parsed_budget: Decimal | None = None
+    if budget is not None and budget != "":
+        try:
+            parsed_budget = Decimal(str(budget))
+        except (ArithmeticError, ValueError):
+            return {
+                "error": "invalid_budget",
+                "message": "Budget must be a number (Rs), e.g. 1500.",
+            }
+        if parsed_budget <= 0:
+            return {
+                "error": "invalid_budget",
+                "message": "Budget must be a positive number.",
+            }
+
+    parsed_party = max(1, int(party_size or 1))
+
+    # Bare tool call with no query AND no budget is a no-op — refuse so the
+    # model asks the customer for one or the other.
+    if not trimmed and parsed_budget is None:
         return {
             "error": "empty_query",
             "message": (
                 "Give me a keyword or short phrase from the customer's own words — "
-                "a dish, cuisine, style, or intent. Do not call this with an empty query."
+                "a dish, cuisine, style, or intent. If the customer only gave a "
+                "budget with no cuisine hint, pass `budget` and this tool will "
+                "list every open restaurant with an estimate."
             ),
         }
 
-    restaurants, matched_items = discovery_service.find_matching_restaurants(
-        db, trimmed,
-    )
+    if trimmed:
+        restaurants, matched_items = discovery_service.find_matching_restaurants(
+            db, trimmed,
+        )
+    else:
+        # Budget-only fallback — customer said "1000 mein kya milega" with
+        # no cuisine hint. List every open, accepting restaurant so the
+        # estimate machinery below can grade them.
+        all_active = db.scalars(
+            select(Restaurant).where(
+                Restaurant.status == RestaurantStatus.ACTIVE,
+                Restaurant.is_accepting_orders.is_(True),
+            )
+        ).all()
+        restaurants = {r.id: r for r in all_active if is_open(r)}
+        # matched_items gets the cuisine text so ranking's "serves X" reason
+        # reads naturally and every candidate gets the same relevance
+        # baseline (0 concrete matches → rating + rotation carry the order).
+        matched_items = {rid: [r.cuisine_type] for rid, r in restaurants.items()}
 
     if not restaurants:
         return {
@@ -254,22 +304,87 @@ def find_restaurants(
         matched_items_by_id=matched_items,
     )[:20]
 
-    return {
-        "query": trimmed,
-        "restaurants": [
-            {
-                "id": rr.restaurant.id,
-                "name": rr.restaurant.name,
-                "cuisine": rr.restaurant.cuisine_type,
-                # matched_items are truthful, quotable strings — real menu item
-                # names when the query matched a menu row, or the restaurant's
-                # cuisine text when it only matched at the restaurant level.
-                "matched_items": matched_items.get(rr.restaurant.id, []),
-                "ranking_note": rr.reason,
-            }
-            for rr in ranked
-        ],
-    }
+    entries: list[dict] = []
+    fits_budget_count = 0
+    for rr in ranked:
+        entry: dict = {
+            "id": rr.restaurant.id,
+            "name": rr.restaurant.name,
+            "cuisine": rr.restaurant.cuisine_type,
+            "matched_items": matched_items.get(rr.restaurant.id, []),
+            "ranking_note": rr.reason,
+        }
+
+        # Estimates only when the caller opted in with a budget or an
+        # explicit party_size — keeps the Phase 5 response shape identical
+        # for all existing callers (find_restaurants(query="biryani") →
+        # exactly what it returned before). The model reads the tool
+        # description and only passes these when the customer mentioned
+        # money or a group size.
+        wants_estimate = parsed_budget is not None or (
+            party_size is not None and party_size > 0
+        )
+        if wants_estimate:
+            # Cost estimate needs REAL MenuItem rows — pull them by name.
+            # Cuisine-only matches (matched_items = [cuisine text]) don't
+            # correspond to any MenuItem row, so fall back to the cheapest
+            # available item as the estimate basis.
+            names = matched_items.get(rr.restaurant.id, [])
+            matched_objs = db.scalars(
+                select(MenuItem).where(
+                    MenuItem.restaurant_id == rr.restaurant.id,
+                    MenuItem.name.in_(names),
+                    MenuItem.is_available.is_(True),
+                )
+            ).all() if names else []
+            if not matched_objs:
+                fallback = discovery_service._cheapest_available_item(
+                    db, rr.restaurant.id,
+                )
+                matched_objs = [fallback] if fallback is not None else []
+
+            estimate = discovery_service.estimate_meal_cost(
+                matched_menu_items=matched_objs,
+                delivery_fee=rr.restaurant.delivery_fee,
+                min_order_amount=rr.restaurant.min_order_amount,
+                party_size=parsed_party,
+            )
+            if estimate is not None:
+                entry["estimate"] = estimate
+                if parsed_budget is not None:
+                    fits = Decimal(estimate["estimated_total"]) <= parsed_budget
+                    entry["fits_budget"] = fits
+                    if fits:
+                        fits_budget_count += 1
+
+        entries.append(entry)
+
+    result: dict = {"query": trimmed, "restaurants": entries}
+
+    if parsed_budget is not None:
+        result["budget"] = f"{parsed_budget:.2f}"
+        result["party_size"] = parsed_party
+        # "Nothing fits" is a common case that needs a graceful response.
+        # Point the model at the cheapest option so it can honestly offer
+        # "the closest is X at Rs. Y — want to stretch the budget?" instead
+        # of pretending something fits.
+        if entries and fits_budget_count == 0:
+            with_estimate = [e for e in entries if "estimate" in e]
+            if with_estimate:
+                cheapest = min(
+                    with_estimate,
+                    key=lambda e: Decimal(e["estimate"]["estimated_total"]),
+                )
+                result["note"] = (
+                    f"None of the matches fit Rs. {parsed_budget:.0f} for "
+                    f"party of {parsed_party}. Cheapest option: "
+                    f"{cheapest['name']} at Rs. {cheapest['estimate']['estimated_total']}. "
+                    "Tell the customer honestly and offer to broaden the "
+                    "budget or try a different cuisine — do NOT pretend "
+                    "an option fits when it does not."
+                )
+
+    return result
 
 
 def _resolve_restaurant(

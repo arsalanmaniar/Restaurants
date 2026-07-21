@@ -33,6 +33,8 @@ truthful and quotable, rather than exposing an internal "matched via
 description" tag.
 """
 
+from decimal import Decimal
+
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -113,3 +115,65 @@ def find_matching_restaurants(
         rid: r for rid, r in restaurants_by_id.items() if is_open(r)
     }
     return open_only, {rid: matched_items[rid] for rid in open_only}
+
+
+def _cheapest_available_item(db: Session, restaurant_id: int) -> MenuItem | None:
+    """Cheapest available menu item for one restaurant. Fallback when a
+    query matched at the restaurant level (cuisine / description) but no
+    concrete menu item — we still need SOMETHING to base a budget estimate
+    on, so we use the price floor as a lower bound."""
+    return db.scalar(
+        select(MenuItem)
+        .where(
+            MenuItem.restaurant_id == restaurant_id,
+            MenuItem.is_available.is_(True),
+        )
+        .order_by(MenuItem.price, MenuItem.id)
+        .limit(1)
+    )
+
+
+def estimate_meal_cost(
+    *,
+    matched_menu_items: list[MenuItem],
+    delivery_fee: Decimal,
+    min_order_amount: Decimal,
+    party_size: int = 1,
+) -> dict | None:
+    """Representative meal-cost estimate for one restaurant.
+
+    Formula: cheapest matched item × party_size + delivery, clamped to the
+    restaurant's minimum order amount (a real order has to clear that).
+    Returns None when there's nothing to base an estimate on — the caller
+    then omits the estimate rather than fabricating a number.
+
+    Deliberately a LOWER bound of a realistic order, not an average — the
+    customer's own message ("Rs. 1500 mein kya milega?") wants a "can I
+    fit?" answer, not a "will I definitely fit?" one. Model surfaces this
+    honestly; the actual place_order total may go higher if the customer
+    adds more.
+    """
+    if not matched_menu_items:
+        return None
+
+    party_size = max(1, int(party_size or 1))
+    primary = min(matched_menu_items, key=lambda i: i.price)
+
+    food = primary.price * party_size
+    # A real order has to clear the restaurant's minimum, so the estimate
+    # can't sit below it — otherwise the model would tell the customer
+    # "fits in Rs. 300" and place_order would then error with below_minimum.
+    if food < min_order_amount:
+        food = min_order_amount
+    total = food + delivery_fee
+
+    return {
+        "primary_item": {
+            "name": primary.name,
+            "price": f"{primary.price:.2f}",
+        },
+        "party_size": party_size,
+        "food_estimate": f"{food:.2f}",
+        "delivery_fee": f"{delivery_fee:.2f}",
+        "estimated_total": f"{total:.2f}",
+    }
