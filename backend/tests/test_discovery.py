@@ -35,7 +35,7 @@ class TestFindMatchingRestaurants:
     from the tool wrapper so search-shape bugs show up as focused failures."""
 
     def test_dish_name_match(self, db, biryani):
-        restaurants, matched = discovery_service.find_matching_restaurants(
+        restaurants, matched, _s, _b = discovery_service.find_matching_restaurants(
             db, "biryani",
         )
         assert biryani.id in restaurants
@@ -51,7 +51,7 @@ class TestFindMatchingRestaurants:
         """A "desi" query matches biryani's cuisine_type='Desi' but no menu
         item literally contains 'desi'. matched_items falls back to the
         cuisine text so ranking still gives it the relevance boost."""
-        restaurants, matched = discovery_service.find_matching_restaurants(
+        restaurants, matched, _s, _b = discovery_service.find_matching_restaurants(
             db, "desi",
         )
         assert biryani.id in restaurants
@@ -63,7 +63,7 @@ class TestFindMatchingRestaurants:
         """'spicy' shows up in Beef Biryani's description ("Slow-cooked beef,
         spicy Sindhi masala") but NOT in any name. Menu-description search
         finds it and matched_items carries the real item name."""
-        restaurants, matched = discovery_service.find_matching_restaurants(
+        restaurants, matched, _s, _b = discovery_service.find_matching_restaurants(
             db, "spicy",
         )
         assert biryani.id in restaurants
@@ -75,7 +75,7 @@ class TestFindMatchingRestaurants:
         restaurant description, no menu item mentions it — restaurant-level
         ILIKE catches it and cuisine text ("Pizza") becomes the matched
         signal."""
-        restaurants, matched = discovery_service.find_matching_restaurants(
+        restaurants, matched, _s, _b = discovery_service.find_matching_restaurants(
             db, "hand-tossed",
         )
         assert pizza.id in restaurants
@@ -85,7 +85,7 @@ class TestFindMatchingRestaurants:
         """A single query can hit several restaurants — 'chicken' matches
         Chicken Biryani (biryani), Chicken Tikka Pizza (pizza), Chicken
         Chowmein (wok & roll). All three must appear."""
-        restaurants, matched = discovery_service.find_matching_restaurants(
+        restaurants, matched, _s, _b = discovery_service.find_matching_restaurants(
             db, "chicken",
         )
         # At least the biryani place, plus at least one other
@@ -93,12 +93,12 @@ class TestFindMatchingRestaurants:
         assert len(restaurants) >= 2
 
     def test_empty_query_returns_nothing(self, db):
-        restaurants, matched = discovery_service.find_matching_restaurants(db, "")
+        restaurants, matched, _s, _b = discovery_service.find_matching_restaurants(db, "")
         assert restaurants == {}
         assert matched == {}
 
     def test_no_match_returns_empty(self, db):
-        restaurants, matched = discovery_service.find_matching_restaurants(
+        restaurants, matched, _s, _b = discovery_service.find_matching_restaurants(
             db, "sushi-omakase-nowhere-xyz",
         )
         assert restaurants == {}
@@ -118,7 +118,7 @@ class TestFindMatchingRestaurants:
         )
         db.flush()
 
-        _, matched = discovery_service.find_matching_restaurants(db, "pizza")
+        _, matched, _s, _b = discovery_service.find_matching_restaurants(db, "pizza")
         # None of the disabled pizza items should appear in matched_items
         disabled = {
             "Chicken Tikka Pizza (Medium)",
@@ -141,7 +141,7 @@ class TestFindMatchingRestaurants:
         )
         db.flush()
 
-        restaurants, _matched = discovery_service.find_matching_restaurants(db, "biryani")
+        restaurants, _matched, _s, _b = discovery_service.find_matching_restaurants(db, "biryani")
         assert biryani.id not in restaurants
 
 
@@ -244,15 +244,23 @@ class TestFindRestaurantsTool:
         result = tools.find_restaurants(db, conversation, query="")
         assert result.get("error") == "empty_query"
 
-    def test_unknown_query_returns_empty_with_fallback_note(
+    def test_unknown_query_returns_empty_with_definitive_note(
         self, db, conversation,
     ):
+        """Was: the note pointed the model at a list_restaurants fallback.
+
+        That instruction is gone. The search already covered every open
+        restaurant, so the answer is definitive — and obeying the old note is
+        what produced "no burger restaurants" immediately followed by a
+        numbered list of restaurants. See test_match_quality.py.
+        """
         result = tools.find_restaurants(
             db, conversation, query="sushi-omakase-nowhere-xyz",
         )
         assert result["restaurants"] == []
-        # Note guides the model toward list_restaurants fallback
-        assert "list_restaurants" in result["note"]
+        assert result["found_anywhere"] is False
+        assert "list_restaurants" not in result["note"]
+        assert result["available_cuisines"]
 
     def test_result_uses_ranking_from_phase_2(
         self, db, conversation, biryani, pizza,

@@ -281,7 +281,10 @@ def search_restaurants_by_item(
             Restaurant.status == RestaurantStatus.ACTIVE,
             Restaurant.is_accepting_orders.is_(True),
             MenuItem.is_available.is_(True),
-            MenuItem.name.ilike(f"%{query}%"),
+            # Word-start anchored, same as discovery — this tool is deprecated
+            # but still callable, and it had the identical mid-word false
+            # positive ("%cola%" matching "Chocolate Shake").
+            MenuItem.name.op("~*")(discovery_service._word_start_pattern(query)),
         )
         .order_by(Restaurant.name, MenuItem.name)
     ).all()
@@ -327,15 +330,34 @@ def search_restaurants_by_item(
     return {"query": query, "restaurants": entries}
 
 
+def _available_cuisines(db: Session) -> list[str]:
+    """Distinct cuisines across open, order-accepting restaurants.
+
+    Handed to the model on a zero-match so it has something CONSTRUCTIVE and
+    truthful to offer. Cuisines, not restaurant names, on purpose: naming
+    restaurants immediately after "we don't have burgers" is what read as a
+    contradiction — naming cuisines reads as an alternative.
+    """
+    restaurants = db.scalars(
+        select(Restaurant).where(
+            Restaurant.status == RestaurantStatus.ACTIVE,
+            Restaurant.is_accepting_orders.is_(True),
+        )
+    ).all()
+    seen: list[str] = []
+    for r in restaurants:
+        if is_open(r) and r.cuisine_type and r.cuisine_type not in seen:
+            seen.append(r.cuisine_type)
+    return seen
+
+
 def _empty_result_note(db: Session, conversation: Conversation, query: str) -> str:
     """What to tell the model when a search found nothing.
 
-    The old note said "fall back to list_restaurants" unconditionally, which is
-    right only for a customer who has been shown nothing yet. For everyone else
-    it is an instruction to throw away the context they are standing in — and
-    because a filler word like "chaiye" was enough to produce an empty result,
-    that reset fired on perfectly ordinary messages. So the advice now depends
-    on what the customer can actually see.
+    Three situations, three different right answers. The original note gave
+    one — "fall back to list_restaurants" — which was correct for none of
+    them once a customer had context, and which manufactured the
+    "no burgers... here are the burger restaurants" contradiction.
     """
     if conversation.active_restaurant_id is not None:
         restaurant = db.get(Restaurant, conversation.active_restaurant_id)
@@ -358,10 +380,20 @@ def _empty_result_note(db: Session, conversation: Conversation, query: str) -> s
             "found among them) and ask which one they want."
         )
 
+    # Genuinely nothing, anywhere, and the customer has no context to preserve.
+    # This searched EVERY open restaurant's name, cuisine, description and full
+    # menu, so the answer is authoritative — say so plainly instead of papering
+    # over it with a list.
     return (
-        f"No open restaurant matches '{query}'. Fall back to "
-        "list_restaurants and offer whatever is available — never tell "
-        "the customer 'we have nothing' without offering the full list."
+        f"Nothing on any open restaurant's menu matches '{query}' — this search "
+        "already covered every restaurant, so the answer is definitive. Tell the "
+        "customer plainly and FIRST that what they asked for is not available "
+        "right now (name the DISH in their own words, not this whole query "
+        "string). Do NOT then present a numbered restaurant list under a "
+        "'restaurants serving <that dish>' heading — you just said we don't have "
+        "it, and listing restaurants under that heading contradicts you in your "
+        "own message. You MAY offer what we DO have, clearly labelled as an "
+        "alternative (see available_cuisines), then ask what they'd like instead."
     )
 
 
@@ -460,9 +492,11 @@ def find_restaurants(
                 }
 
     if trimmed:
-        restaurants, matched_items = discovery_service.find_matching_restaurants(
-            db, trimmed,
-        )
+        found = discovery_service.find_matching_restaurants(db, trimmed)
+        restaurants = found.restaurants
+        matched_items = found.matched_items
+        strengths = found.strengths
+        broadened = found.broadened
     else:
         # Budget-only fallback — customer said "1000 mein kya milega" with
         # no cuisine hint. List every open, accepting restaurant so the
@@ -478,11 +512,18 @@ def find_restaurants(
         # reads naturally and every candidate gets the same relevance
         # baseline (0 concrete matches → rating + rotation carry the order).
         matched_items = {rid: [r.cuisine_type] for rid, r in restaurants.items()}
+        strengths = {rid: discovery_service.MATCH_STRONG for rid in restaurants}
+        broadened = False
 
     if not restaurants:
         return {
             "query": trimmed,
             "restaurants": [],
+            # The search covered every open restaurant, so this is not "we
+            # didn't find it" — it is "it does not exist here". The model
+            # needs that distinction to answer honestly instead of hedging.
+            "found_anywhere": False,
+            "available_cuisines": _available_cuisines(db),
             "note": _empty_result_note(db, conversation, trimmed),
         }
 
@@ -490,17 +531,31 @@ def find_restaurants(
         db,
         list(restaurants.values()),
         matched_items_by_id=matched_items,
+        relevance_by_id={
+            rid: discovery_service.RELEVANCE_BY_STRENGTH[strength]
+            for rid, strength in strengths.items()
+        },
     )[:20]
 
     entries: list[dict] = []
     fits_budget_count = 0
     for rr in ranked:
+        strength = strengths.get(rr.restaurant.id, discovery_service.MATCH_STRONG)
         entry: dict = {
             "id": rr.restaurant.id,
             "name": rr.restaurant.name,
             "cuisine": rr.restaurant.cuisine_type,
             "matched_items": matched_items.get(rr.restaurant.id, []),
             "ranking_note": rr.reason,
+            # Match provenance. Turn 4 of the burger trace listed a restaurant
+            # the model itself knew was wrong, because the result gave it no
+            # way to tell a real dish match from an incidental one.
+            "match_strength": strength,
+            "matched_on": (
+                "menu item name, restaurant name or cuisine"
+                if strength == discovery_service.MATCH_STRONG
+                else "description text only — the dish itself may NOT be on the menu"
+            ),
         }
 
         # Estimates only when the caller opted in with a budget or an
@@ -553,6 +608,29 @@ def find_restaurants(
     remember_shown_restaurants(conversation, entries, query=trimmed)
 
     result: dict = {"query": trimmed, "restaurants": entries}
+
+    # Honesty flags. Without these the model presents a broadened or
+    # description-only hit with exactly the same confidence as a direct dish
+    # match, which is how "burger?" came back looking like a real answer.
+    if broadened:
+        result["broadened"] = True
+        result["broadened_note"] = (
+            f"No restaurant matched '{trimmed}' exactly — these came from a "
+            "WIDER search on individual words. Say so before listing them: "
+            "tell the customer you couldn't find that exact thing and offer "
+            "these as the closest options, rather than presenting them as a "
+            "direct answer."
+        )
+    if entries and all(
+        e["match_strength"] == discovery_service.MATCH_WEAK for e in entries
+    ):
+        result["weak_matches_only"] = True
+        result["weak_match_note"] = (
+            f"Every result matched only on description text, NOT on a dish "
+            f"name — none of these is confirmed to actually serve '{trimmed}'. "
+            "Do NOT claim they do. Offer them as possibilities and call "
+            "get_menu to check before promising anything."
+        )
 
     if parsed_budget is not None:
         result["budget"] = f"{parsed_budget:.2f}"

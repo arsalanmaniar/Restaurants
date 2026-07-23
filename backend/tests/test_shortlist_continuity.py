@@ -49,7 +49,7 @@ class TestFillerWordQueries:
             "mujhe biryani chahiye",
             "biryani hai kya",
         ):
-            restaurants, _ = discovery_service.find_matching_restaurants(db, query)
+            restaurants, _m, _s, _b = discovery_service.find_matching_restaurants(db, query)
             assert biryani.id in restaurants, f"{query!r} found nothing"
 
     def test_exact_phrase_still_wins_over_token_fallback(self, db, pizza, biryani):
@@ -57,7 +57,7 @@ class TestFillerWordQueries:
         broader per-token pass must NOT run — otherwise the loose "chicken"
         token would drag in Chicken Tikka Pizza and Chicken Chowmein and the
         customer's specific request would come back as "here's everything"."""
-        restaurants, _ = discovery_service.find_matching_restaurants(
+        restaurants, _m, _s, _b = discovery_service.find_matching_restaurants(
             db, "chicken biryani",
         )
         assert biryani.id in restaurants
@@ -66,7 +66,7 @@ class TestFillerWordQueries:
     def test_pure_filler_query_still_returns_nothing(self, db):
         """"kya hai" carries no dish signal. Stripping filler must leave zero
         terms and return empty — not fall through to matching everything."""
-        restaurants, _ = discovery_service.find_matching_restaurants(db, "kya hai")
+        restaurants, _m, _s, _b = discovery_service.find_matching_restaurants(db, "kya hai")
         assert restaurants == {}
 
     def test_significant_tokens_strips_filler_and_punctuation(self):
@@ -285,13 +285,25 @@ class TestSelectionAmbiguityFallsThrough:
 
 class TestEmptyResultNote:
 
-    def test_first_contact_still_recommends_list_restaurants(self, db, conversation):
-        """Unchanged for a customer who has been shown nothing — offering the
-        full list IS the right move on first contact."""
+    def test_first_contact_gives_a_definitive_answer_not_a_list(
+        self, db, conversation,
+    ):
+        """Superseded. This used to assert the first-contact zero-match told
+        the model to fall back to list_restaurants.
+
+        That was wrong even on first contact: the search covers every open
+        restaurant, so a zero result means the item does not exist here, and
+        printing a restaurant list under the customer's own search term reads
+        as a contradiction rather than a helpful fallback. The model may still
+        OFFER alternatives — via available_cuisines, labelled as alternatives.
+        """
         result = tools.find_restaurants(
             db, conversation, query="sushi-omakase-nowhere-xyz",
         )
-        assert "list_restaurants" in result["note"]
+        assert result["found_anywhere"] is False
+        assert "list_restaurants" not in result["note"]
+        assert "not available" in result["note"]
+        assert result["available_cuisines"]
 
     def test_note_forbids_reset_once_a_shortlist_was_shown(
         self, db, conversation, biryani,

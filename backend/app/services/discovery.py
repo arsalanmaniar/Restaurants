@@ -34,6 +34,7 @@ description" tag.
 """
 
 from decimal import Decimal
+from typing import NamedTuple
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -42,6 +43,23 @@ from app.models import MenuItem, Restaurant, RestaurantStatus
 from app.services.opening_hours import is_open
 
 MAX_MATCHED_ITEMS_PER_RESTAURANT = 5
+
+# How a restaurant earned its place in the results.
+#
+#   STRONG — the query hit a menu item NAME, the restaurant NAME, or its
+#            CUISINE. The customer asked for a thing and we have that thing.
+#   WEAK   — the query only turned up inside DESCRIPTION prose. Often real
+#            ("spicy" lives in Beef Biryani's description and nowhere else),
+#            but it is evidence of a different order, and ranking a weak hit
+#            level with a real dish match is what let a burger query come
+#            back looking like a confident answer.
+MATCH_STRONG = "strong"
+MATCH_WEAK = "weak"
+
+# Fed to ranking.rank_restaurants as `relevance`. score = 3×relevance + …,
+# so strong = 3.0 (unchanged), weak = 1.2 — ahead of no match at all, well
+# behind a genuine one, and never enough to outrank a real hit.
+RELEVANCE_BY_STRENGTH = {MATCH_STRONG: 1.0, MATCH_WEAK: 0.4}
 
 # Filler words that carry no dish/cuisine meaning. The model is told to pass
 # "a keyword or short phrase from their message" and in practice it passes the
@@ -64,6 +82,7 @@ _STOPWORDS = frozenset(
     hum mujhe mujhy mera meri
     yeh ye wo woh is us
     order chahta chahti
+    mil mile milay milega milegi milta milti milna jaega jayega jaegi
     the a an is are am was were be been
     i we you me my our your
     want need give show tell about have has
@@ -95,37 +114,80 @@ def _significant_tokens(query: str) -> list[str]:
     return tokens
 
 
+def _regex_literal(term: str) -> str:
+    """Escape a customer-supplied term for use inside a Postgres regex.
+
+    The phrase pass searches on raw message text, so an unescaped "(" or "*"
+    would be a syntax error rather than a search. Alphanumerics and spaces
+    pass through; everything else is backslash-escaped, which Postgres ARE
+    reads as the literal character.
+    """
+    return "".join(
+        ch if ch.isalnum() or ch == " " else "\\" + ch for ch in term
+    )
+
+
+def _word_start_pattern(term: str) -> str:
+    r"""`\m` anchors the match to the START of a word.
+
+    This is the fix for a whole class of false positive. Unanchored
+    `ILIKE '%mil%'` matched "Fa-mil-y", so "burger mil jaega" returned a
+    biryani restaurant; `'%cola%'` matched "Cho-cola-te" and `'%lassi%'`
+    matched "c-lassi-c". Anchoring kills all three outright.
+
+    Word-START rather than whole-word (`\y…\y`) is deliberate: it keeps
+    prefix behaviour that customers rely on — "biry" still finds every
+    biryani, and a "burger" query would still match "Burgers". Requiring a
+    full word would trade a real feature for nothing.
+    """
+    return r"\m" + _regex_literal(term)
+
+
 def _match_terms(
     db: Session, terms: list[str],
-) -> tuple[dict[int, Restaurant], dict[int, list[str]]]:
-    """One search pass over the five columns for an OR-set of LIKE terms."""
-    if not terms:
-        return {}, {}
+) -> tuple[dict[int, Restaurant], dict[int, list[str]], dict[int, str]]:
+    """One search pass over the five columns for an OR-set of terms.
 
-    likes = [f"%{term}%" for term in terms]
+    Returns (restaurants, matched_items, strengths) — see MATCH_STRONG /
+    MATCH_WEAK for what the strength means and why it exists.
+    """
+    if not terms:
+        return {}, {}, {}
+
+    patterns = [_word_start_pattern(term) for term in terms]
 
     restaurants_by_id: dict[int, Restaurant] = {}
     matched_items: dict[int, list[str]] = {}
+    strengths: dict[int, str] = {}
+
+    def _record_strength(restaurant_id: int, strong: bool) -> None:
+        """Strongest signal wins — one real dish-name hit outranks any number
+        of incidental description mentions."""
+        if strong:
+            strengths[restaurant_id] = MATCH_STRONG
+        else:
+            strengths.setdefault(restaurant_id, MATCH_WEAK)
 
     # Menu item matches first — a concrete dish name is the strongest,
     # most quotable signal, so we prefer real item names in matched_items
-    # over a fallback to cuisine text.
+    # over a fallback to cuisine text. The name/description split is selected
+    # alongside each row so we know WHICH field earned the hit.
+    item_name_match = or_(*[MenuItem.name.op("~*")(p) for p in patterns])
+    item_desc_match = or_(*[MenuItem.description.op("~*")(p) for p in patterns])
     menu_rows = db.execute(
-        select(Restaurant, MenuItem.name)
+        select(Restaurant, MenuItem.name, item_name_match.label("is_strong"))
         .join(MenuItem, MenuItem.restaurant_id == Restaurant.id)
         .where(
             Restaurant.status == RestaurantStatus.ACTIVE,
             Restaurant.is_accepting_orders.is_(True),
             MenuItem.is_available.is_(True),
-            or_(
-                *[MenuItem.name.ilike(like) for like in likes],
-                *[MenuItem.description.ilike(like) for like in likes],
-            ),
+            or_(item_name_match, item_desc_match),
         )
         .order_by(Restaurant.id, MenuItem.name)
     ).all()
-    for r, item_name in menu_rows:
+    for r, item_name, is_strong in menu_rows:
         restaurants_by_id.setdefault(r.id, r)
+        _record_strength(r.id, bool(is_strong))
         items = matched_items.setdefault(r.id, [])
         if item_name not in items and len(items) < MAX_MATCHED_ITEMS_PER_RESTAURANT:
             items.append(item_name)
@@ -133,19 +195,21 @@ def _match_terms(
     # Restaurant-level fields — cuisine, name, description. Any restaurant
     # that already got picked up via menu keeps its menu-item matched_items
     # unchanged; new arrivals get their cuisine text as the match signal.
-    restaurant_hits = db.scalars(
-        select(Restaurant).where(
+    r_strong_match = or_(
+        *[Restaurant.name.op("~*")(p) for p in patterns],
+        *[Restaurant.cuisine_type.op("~*")(p) for p in patterns],
+    )
+    r_desc_match = or_(*[Restaurant.description.op("~*")(p) for p in patterns])
+    restaurant_rows = db.execute(
+        select(Restaurant, r_strong_match.label("is_strong")).where(
             Restaurant.status == RestaurantStatus.ACTIVE,
             Restaurant.is_accepting_orders.is_(True),
-            or_(
-                *[Restaurant.name.ilike(like) for like in likes],
-                *[Restaurant.cuisine_type.ilike(like) for like in likes],
-                *[Restaurant.description.ilike(like) for like in likes],
-            ),
+            or_(r_strong_match, r_desc_match),
         )
     ).all()
-    for r in restaurant_hits:
+    for r, is_strong in restaurant_rows:
         restaurants_by_id.setdefault(r.id, r)
+        _record_strength(r.id, bool(is_strong))
         if not matched_items.get(r.id):
             # Cuisine text is always truthful and reads well in the ranking
             # reason ("serves Chinese; rated 4.5/5"). Never leak internal
@@ -157,24 +221,35 @@ def _match_terms(
     open_only = {
         rid: r for rid, r in restaurants_by_id.items() if is_open(r)
     }
-    return open_only, {rid: matched_items[rid] for rid in open_only}
+    return (
+        open_only,
+        {rid: matched_items[rid] for rid in open_only},
+        {rid: strengths[rid] for rid in open_only},
+    )
 
 
-def find_matching_restaurants(
-    db: Session, query: str,
-) -> tuple[dict[int, Restaurant], dict[int, list[str]]]:
+class DiscoveryResult(NamedTuple):
+    """What a discovery search found, and how much to trust it."""
+
+    restaurants: dict[int, Restaurant]
+    matched_items: dict[int, list[str]]
+    # {restaurant_id: MATCH_STRONG | MATCH_WEAK}
+    strengths: dict[int, str]
+    # True when the exact phrase found nothing and we had to fall back to
+    # individual words. The caller tells the model, so it can be honest:
+    # "burger to nahi mila, ye milta-julta hai" instead of presenting a
+    # broadened guess as a confident answer.
+    broadened: bool
+
+
+def find_matching_restaurants(db: Session, query: str) -> DiscoveryResult:
     """Every open restaurant whose name/cuisine/description or menu item
-    name/description matches the query, plus the customer-visible matched
-    items per restaurant.
-
-    Returns (`{restaurant_id: Restaurant}`, `{restaurant_id: [matched_item, …]}`).
-    Callers hand matched_items straight to `ranking.rank_restaurants` so
-    every matched restaurant scores relevance=1.0 (see services/ranking.py).
+    name/description matches the query, with per-restaurant match strength.
 
     Two passes, in order:
 
-      1. The whole phrase as one LIKE term. Exact and precise — "chicken
-         biryani" only matches things that literally contain that phrase.
+      1. The whole phrase as one term. Exact and precise — "chicken biryani"
+         only matches things that contain that phrase.
       2. If (and only if) pass 1 found nothing, retry on the individual
          significant words (filler stripped, see `_STOPWORDS`). This is what
          makes "Biryani chaiye", "biryani hai" and "Biryani ka batao" land on
@@ -184,21 +259,28 @@ def find_matching_restaurants(
     Pass 1 runs first so the phrase result always wins when it exists: token
     matching is deliberately broader and would otherwise dilute a good
     multi-word query with single-word noise.
+
+    Both passes anchor to word starts (see `_word_start_pattern`), so no pass
+    can match mid-word junk regardless of how the query was split.
     """
     trimmed = (query or "").strip()
     if not trimmed:
-        return {}, {}
+        return DiscoveryResult({}, {}, {}, broadened=False)
 
-    restaurants, matched = _match_terms(db, [trimmed])
+    restaurants, matched, strengths = _match_terms(db, [trimmed])
     if restaurants:
-        return restaurants, matched
+        return DiscoveryResult(restaurants, matched, strengths, broadened=False)
 
     tokens = _significant_tokens(trimmed)
     # Nothing to gain from re-running an identical single-term search.
     if not tokens or tokens == [trimmed.lower()]:
-        return {}, {}
+        return DiscoveryResult({}, {}, {}, broadened=False)
 
-    return _match_terms(db, tokens)
+    restaurants, matched, strengths = _match_terms(db, tokens)
+    # Only call it broadened if widening actually produced something.
+    return DiscoveryResult(
+        restaurants, matched, strengths, broadened=bool(restaurants)
+    )
 
 
 def _cheapest_available_item(db: Session, restaurant_id: int) -> MenuItem | None:

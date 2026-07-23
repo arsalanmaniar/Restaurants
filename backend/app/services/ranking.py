@@ -115,6 +115,7 @@ def rank_restaurants(
     restaurants: Iterable[Restaurant],
     *,
     matched_items_by_id: dict[int, list[str]] | None = None,
+    relevance_by_id: dict[int, float] | None = None,
     at: datetime | None = None,
 ) -> list[RankedRestaurant]:
     """Return restaurants in ranked order with a per-restaurant score and reason.
@@ -124,19 +125,27 @@ def rank_restaurants(
     nothing and every candidate scores 0 on relevance (leaving rating + rotation
     to decide the order). Ranking is stable within a day: same inputs → same
     output, no per-request randomness.
+
+    `relevance_by_id` grades that match instead of treating every hit as
+    equal. find_restaurants passes it so a restaurant that merely had the word
+    somewhere in its description does not rank level with one that actually
+    serves the dish (see discovery.RELEVANCE_BY_STRENGTH). Omit it and the
+    old all-or-nothing behaviour applies unchanged, which is what keeps
+    list_restaurants and search_restaurants_by_item as they were.
     """
     candidates = list(restaurants)
     if not candidates:
         return []
 
     matched_items_by_id = matched_items_by_id or {}
+    relevance_by_id = relevance_by_id or {}
     ratings = _avg_ratings(db, [r.id for r in candidates])
     day = _today_karachi(at)
 
     ranked: list[RankedRestaurant] = []
     for r in candidates:
         matched = matched_items_by_id.get(r.id, [])
-        relevance = 1.0 if matched else 0.0
+        relevance = relevance_by_id.get(r.id, 1.0 if matched else 0.0)
         avg, count = ratings.get(r.id, (None, 0))
         rating_normalised = _normalise_rating(avg)
         rotation = _rotation_seed(r.id, day)
