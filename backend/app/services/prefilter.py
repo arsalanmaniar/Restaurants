@@ -26,10 +26,11 @@ from app.models.enums import MessageDirection
 
 
 OFFTOPIC_REDIRECT = (
-    "I'm here to help you order food! What would you like to eat today? 🍴"
+    "I'm here to help with food orders. What would you like to order today?"
 )
 RATE_LIMITED_REPLY = (
-    "You're sending messages very fast — please slow down for a moment 🙂"
+    "We're receiving your messages faster than we can process them. "
+    "Please wait a moment before sending another."
 )
 
 # 15/minute is a comfortable ceiling: a real ordering conversation is 5–10

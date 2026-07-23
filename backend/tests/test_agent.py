@@ -79,12 +79,12 @@ class TestNewOrderingFlow:
                 completion(
                     message(
                         content=(
-                            "Welcome to AbhiAya! 🍴\n\n"
+                            "Welcome to AbhiAya.\n\n"
                             "Available restaurants:\n"
                             "1. Karachi Biryani House\n"
                             "2. Pizza Junction\n"
                             "3. Wok & Roll\n\n"
-                            "Which would you like to order from? 🍴"
+                            "Which restaurant would you like to order from?"
                         )
                     )
                 ),
@@ -93,10 +93,13 @@ class TestNewOrderingFlow:
         agent.handle_incoming_message(db, conversation, "hi")
 
         greeting_reply = sent[-1]
-        assert "Welcome to AbhiAya!" in greeting_reply
+        assert "Welcome to AbhiAya" in greeting_reply
         assert "Available restaurants:" in greeting_reply
         assert "1. " in greeting_reply, "restaurant list must be numbered"
-        assert greeting_reply.rstrip().endswith("🍴"), "must end with the emoji-question"
+        # Was: must end with the emoji-question. The turn SHAPE (greeting +
+        # numbered list + forward-moving question) is the thing worth pinning;
+        # the trailing 🍴 was tone, and the prompt no longer asks for emojis.
+        assert greeting_reply.rstrip().endswith("?"), "must end with a question"
 
         # Turn 2: picks the restaurant by name -> get_menu, then items with prices.
         scripted_model(
