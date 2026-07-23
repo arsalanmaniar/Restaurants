@@ -25,6 +25,7 @@ from app.core.config import settings
 from app.models import Conversation, MessageDirection, Order, Restaurant
 from app.services import conversations as convo
 from app.services import prefilter
+from app.services import tools
 from app.services.payments.registry import available_methods
 from app.services.tool_schemas import TOOL_SCHEMAS
 from app.services.tools import TOOL_IMPLS
@@ -187,11 +188,12 @@ Which would you like to order from? 🍴
 Header uses the customer's own word when from `find_restaurants` ("Here are \
 restaurants serving X:", "Here are spicy options:", etc.); use "Here are \
 available restaurants:" when from list_restaurants. If `find_restaurants` \
-returns empty AND no restaurant is yet active (see "Active restaurant" in \
-the system message when it appears), fall back to list_restaurants — never \
-tell the customer "we have nothing" without trying that fallback. If a \
-restaurant IS active, do NOT reset to list_restaurants — see \
-"Restaurant-scoped continuity" further down.
+returns empty, fall back to list_restaurants ONLY when the customer has not \
+been shown anything yet — i.e. the system message has NEITHER an "Active \
+restaurant" line NOR a "Restaurants you have ALREADY shown this customer" \
+line. In that first-contact case, never tell the customer "we have nothing" \
+without trying that fallback. If either line IS present, do NOT reset to \
+list_restaurants — see "Restaurant-scoped continuity" further down.
 3. Once they pick a restaurant (by number, name, or "show me the menu"), you MUST \
 call `get_menu` for that restaurant — SHOWING THE MENU is the primary job of this \
 turn. Show the items with prices as plain lines (item — Rs. price), grouped \
@@ -346,6 +348,27 @@ customer's context. If find_restaurants returns empty AND a restaurant \
 is active, tell the customer plainly what wasn't found and ask what to \
 do next — do not dump the full restaurant list on them.
 
+Shortlist continuity — the SAME rule, one step earlier in the flow. \
+Before anyone has picked a restaurant, the customer is still standing in \
+something: the shortlist you just showed them. The system message lists \
+it as "Restaurants you have ALREADY shown this customer". While that \
+line is present:
+- If their next message NAMES one of those restaurants, that is a \
+SELECTION — even when it is wrapped in a question ("Mandi house per \
+hoti h biryani?", "does Pizza Junction have wings?", "wok and roll se \
+kya milega?"). Call `get_menu` for that restaurant and answer their \
+question from its menu. Do NOT re-run a search on the sentence, and do \
+NOT ask them to pick again — they just did.
+- If they ask about the SAME dish again in different words ("biryani \
+chaiye?", "biryani ka batao", "aur biryani?"), they are not starting \
+over — they are nudging you. Re-offer the SAME shortlist you already \
+showed, or name 2-3 dishes from those restaurants. Presenting the full \
+generic restaurant list here reads as though the bot forgot the last \
+30 seconds, which is the single fastest way to lose the order.
+- Pass a SHORT keyword to find_restaurants — the dish or cuisine word \
+only ("biryani"), never the customer's whole sentence ("biryani ka \
+batao"). Filler words are what turn a good query into zero results.
+
 Sales flow spine — the natural progression that ends in a placed order:
 DISCOVER (restaurant / dish) → SHOW MENU → UNDERSTAND ITEM & QUANTITY → \
 RECOMMEND / ANSWER → ADD TO CART → (optional) UPSELL ONCE → CONFIRM \
@@ -487,6 +510,43 @@ def _active_restaurant_facts(db: Session, conversation: Conversation) -> str:
     )
 
 
+def _shown_restaurant_facts(conversation: Conversation) -> str:
+    """The candidate list the customer is currently choosing from.
+
+    The discovery-phase counterpart to `_menu_facts`. Without it the model had
+    an authoritative anchor only AFTER a restaurant was picked
+    (`_active_restaurant_facts`); during discovery — which is exactly where the
+    customer is when they say "Mandi house per hoti h biryani?" — the system
+    message was silent, so the model fell back on re-listing everything.
+
+    Empty once a restaurant is active: `_active_restaurant_facts` is the
+    stronger anchor at that point and two competing "focus on this" directives
+    only muddy the turn.
+    """
+    if conversation.active_restaurant_id is not None:
+        return ""
+    candidates = tools.shown_restaurants(conversation)
+    if not candidates:
+        return ""
+
+    listed = ", ".join(f"{c['name']} (id={c['id']})" for c in candidates)
+    query = (conversation.context or {}).get(tools.SHOWN_RESTAURANTS_QUERY_KEY) or ""
+    intro = (
+        f"Restaurants you have ALREADY shown this customer for '{query}': {listed}."
+        if query
+        else f"Restaurants you have ALREADY shown this customer: {listed}."
+    )
+    return (
+        intro
+        + " They are choosing from THIS list. If their next message names one of "
+        "them — even inside a question like 'X per biryani hoti hai?' — that is a "
+        "SELECTION: call get_menu for it and answer their question from the menu. "
+        "If they ask about the same dish again in different words, re-offer THIS "
+        "list; do NOT call list_restaurants and do NOT present the full "
+        "restaurant list as if the conversation just started."
+    )
+
+
 def _payment_facts() -> str:
     """What we can ACTUALLY take money with, right now.
 
@@ -517,6 +577,7 @@ def _build_messages(db: Session, conversation: Conversation) -> list[dict]:
                     known_address,
                     _flow_state(conversation),
                     _active_restaurant_facts(db, conversation),
+                    _shown_restaurant_facts(conversation),
                     _payment_facts(),
                     _menu_facts(conversation),
                     _cart_summary(conversation),

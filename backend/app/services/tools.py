@@ -76,6 +76,127 @@ def generate_order_number() -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Shown-restaurant memory
+#
+# `get_menu` has always recorded what it showed (`shown_menu`, `shown_menu_ids`)
+# so the model can answer follow-ups from real data. The DISCOVERY tools had no
+# equivalent: a customer asked "Biryani hai?", got "1. Karachi Biryani House
+# 2. Mandi House", then asked "Mandi house per hoti h biryani?" — and because
+# nothing remembered that list, the follow-up was treated as fresh discovery,
+# matched nothing, and reset the customer to the generic restaurant list.
+#
+# Two things fix that, and both live below:
+#   * remember the candidate list (`shown_restaurants`), and
+#   * treat a message that NAMES one of those candidates as a selection.
+# --------------------------------------------------------------------------- #
+
+SHOWN_RESTAURANTS_KEY = "shown_restaurants"
+SHOWN_RESTAURANTS_QUERY_KEY = "shown_restaurants_query"
+MAX_REMEMBERED_SHOWN_RESTAURANTS = 20
+
+# Words that appear in restaurant names but identify nothing on their own.
+# Stripped when deriving a name's "distinctive core", so "Mandi House" can be
+# picked out of a message by the word "mandi" alone.
+_GENERIC_NAME_WORDS = frozenset(
+    {"restaurant", "restaurants", "house", "kitchen", "cafe", "hotel", "the", "and", "co"}
+)
+
+
+def _normalize_for_match(text: str) -> str:
+    """Lowercase, punctuation-to-space, single-spaced. '&' in "Wok & Roll" and a
+    trailing '?' on a WhatsApp message must not change whether a name matches."""
+    return " ".join(
+        "".join(ch if ch.isalnum() else " " for ch in (text or "")).lower().split()
+    )
+
+
+def _distinctive_core(name: str) -> str:
+    """The restaurant name with generic words removed — "Mandi House" -> "mandi",
+    "Karachi Biryani House" -> "karachi biryani". Falls back to the full
+    normalized name when a name is generic all the way through."""
+    words = [w for w in _normalize_for_match(name).split() if w not in _GENERIC_NAME_WORDS]
+    return " ".join(words) or _normalize_for_match(name)
+
+
+def remember_shown_restaurants(
+    conversation: Conversation, entries: list[dict], query: str = "",
+) -> None:
+    """Record the candidate list just presented to the customer.
+
+    Reassigned rather than mutated — JSONB change tracking needs a new object,
+    the same reason `get_menu` rebuilds `context` instead of updating it in place.
+    """
+    if not entries:
+        return
+    context = dict(conversation.context or {})
+    context[SHOWN_RESTAURANTS_KEY] = [
+        {"id": int(e["id"]), "name": e["name"]}
+        for e in entries[:MAX_REMEMBERED_SHOWN_RESTAURANTS]
+    ]
+    context[SHOWN_RESTAURANTS_QUERY_KEY] = query
+    conversation.context = context
+
+
+def shown_restaurants(conversation: Conversation) -> list[dict]:
+    return list((conversation.context or {}).get(SHOWN_RESTAURANTS_KEY) or [])
+
+
+def resolve_shown_candidate(conversation: Conversation, query: str) -> int | None:
+    """The id of a just-shown restaurant that this message NAMES, if any.
+
+    Deliberately scoped to the shown list, never the whole catalog: naming a
+    restaurant we just offered is a selection, whereas an incidental word match
+    against some restaurant the customer has never seen is the silent-switch bug
+    Phase 8 fixed. Two tiers, strictest first:
+
+      A. The full name appears in the message — "mandi house per hoti h biryani".
+      B. The distinctive core appears as whole words AND identifies exactly one
+         candidate — "mandi wala" -> Mandi House.
+
+    Ambiguity always loses, in BOTH tiers: if the message could mean two
+    different candidates we return None and let the normal search run, so the
+    model re-offers the shortlist and asks instead of picking for the customer.
+    Choosing a restaurant on someone's behalf is worse than one extra question.
+    """
+    candidates = shown_restaurants(conversation)
+    if not candidates:
+        return None
+
+    padded = f" {_normalize_for_match(query)} "
+    if padded.strip() == "":
+        return None
+
+    full_hits = [
+        entry for entry in candidates
+        if f" {_normalize_for_match(entry['name'])} " in padded
+    ]
+    if full_hits:
+        longest = max(
+            full_hits, key=lambda e: len(_normalize_for_match(e["name"]))
+        )
+        longest_name = _normalize_for_match(longest["name"])
+        # Nested names — "Biryani House" sitting inside "Karachi Biryani House"
+        # — are ONE mention, and the longest is the real match. Two genuinely
+        # different names in one message means the customer is comparing them
+        # ("Karachi Biryani House ya Pizza Junction?"), not picking one.
+        if all(
+            _normalize_for_match(entry["name"]) in longest_name
+            for entry in full_hits
+        ):
+            return int(longest["id"])
+        return None
+
+    core_hits = [
+        entry for entry in candidates
+        if f" {_distinctive_core(entry['name'])} " in padded
+    ]
+    if len(core_hits) == 1:
+        return int(core_hits[0]["id"])
+
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Tool implementations
 # --------------------------------------------------------------------------- #
 
@@ -134,6 +255,7 @@ def list_restaurants(db: Session, conversation: Conversation, cuisine: str | Non
             f"Only one match for '{cuisine}'. If the customer's dish isn't on this "
             "restaurant's menu, call search_restaurants_by_item next."
         )
+    remember_shown_restaurants(conversation, payload["restaurants"], query=cuisine or "")
     return payload
 
 
@@ -197,13 +319,50 @@ def search_restaurants_by_item(
         matched_items_by_id={rid: entry["matched_items"] for rid, entry in matches.items()},
     )[:20]
 
-    return {
-        "query": query,
-        "restaurants": [
-            {**matches[rr.restaurant.id], "ranking_note": rr.reason}
-            for rr in ranked
-        ],
-    }
+    entries = [
+        {**matches[rr.restaurant.id], "ranking_note": rr.reason}
+        for rr in ranked
+    ]
+    remember_shown_restaurants(conversation, entries, query=query)
+    return {"query": query, "restaurants": entries}
+
+
+def _empty_result_note(db: Session, conversation: Conversation, query: str) -> str:
+    """What to tell the model when a search found nothing.
+
+    The old note said "fall back to list_restaurants" unconditionally, which is
+    right only for a customer who has been shown nothing yet. For everyone else
+    it is an instruction to throw away the context they are standing in — and
+    because a filler word like "chaiye" was enough to produce an empty result,
+    that reset fired on perfectly ordinary messages. So the advice now depends
+    on what the customer can actually see.
+    """
+    if conversation.active_restaurant_id is not None:
+        restaurant = db.get(Restaurant, conversation.active_restaurant_id)
+        if restaurant is not None:
+            return (
+                f"No match for '{query}'. The customer is currently browsing "
+                f"{restaurant.name} — do NOT call list_restaurants, that would reset "
+                "them. Answer from the menu already shown, say plainly if the item "
+                "isn't on it, and ask whether they want you to look elsewhere."
+            )
+
+    candidates = shown_restaurants(conversation)
+    if candidates:
+        names = ", ".join(entry["name"] for entry in candidates)
+        return (
+            f"No match for '{query}'. You have ALREADY shown this customer these "
+            f"restaurants: {names}. Do NOT call list_restaurants — that throws away "
+            "the list they are choosing from and feels like the conversation "
+            "restarted. Re-offer those options (or say plainly that this wasn't "
+            "found among them) and ask which one they want."
+        )
+
+    return (
+        f"No open restaurant matches '{query}'. Fall back to "
+        "list_restaurants and offer whatever is available — never tell "
+        "the customer 'we have nothing' without offering the full list."
+    )
 
 
 def find_restaurants(
@@ -267,6 +426,39 @@ def find_restaurants(
             ),
         }
 
+    # SELECTION BEFORE SEARCH. If this message names a restaurant we just put in
+    # front of the customer, they are picking it, not starting a new search —
+    # "Mandi house per hoti h biryani?" right after we listed Mandi House is a
+    # selection plus a menu question. Treating it as discovery is what reset the
+    # conversation to the generic restaurant list.
+    #
+    # Skipped when a budget or party_size is in play: those are genuinely
+    # cross-restaurant comparison questions even when a name is mentioned.
+    if trimmed and parsed_budget is None and not party_size:
+        selected_id = resolve_shown_candidate(conversation, trimmed)
+        if selected_id is not None:
+            menu = get_menu(db, conversation, restaurant_id=selected_id)
+            # get_menu sets active_restaurant_id + shown_menu, so from here on
+            # Phase 8's restaurant-scoped continuity carries the conversation.
+            # If it failed (closed, empty menu) fall through to a normal search
+            # rather than dead-ending the customer.
+            if "error" not in menu:
+                return {
+                    "query": trimmed,
+                    "selected_from_shown_list": True,
+                    "restaurant": menu["restaurant"],
+                    "items": menu["items"],
+                    "instruction": (
+                        f"The customer picked {menu['restaurant']['name']} from the "
+                        "list you just showed them — this is a SELECTION, not a new "
+                        "search. It is now the active restaurant and its full menu is "
+                        "above. Do NOT call find_restaurants or list_restaurants "
+                        "again. If they asked whether a specific dish is available, "
+                        "answer from these items (quote the real Rs. price); "
+                        "otherwise show the menu and ask what they'd like."
+                    ),
+                }
+
     if trimmed:
         restaurants, matched_items = discovery_service.find_matching_restaurants(
             db, trimmed,
@@ -291,11 +483,7 @@ def find_restaurants(
         return {
             "query": trimmed,
             "restaurants": [],
-            "note": (
-                f"No open restaurant matches '{trimmed}'. Fall back to "
-                "list_restaurants and offer whatever is available — never tell "
-                "the customer 'we have nothing' without offering the full list."
-            ),
+            "note": _empty_result_note(db, conversation, trimmed),
         }
 
     ranked = ranking.rank_restaurants(
@@ -358,6 +546,11 @@ def find_restaurants(
                         fits_budget_count += 1
 
         entries.append(entry)
+
+    # Remember what we are about to put in front of the customer, so the NEXT
+    # message naming one of these lands in the selection path above instead of
+    # being re-searched from scratch.
+    remember_shown_restaurants(conversation, entries, query=trimmed)
 
     result: dict = {"query": trimmed, "restaurants": entries}
 

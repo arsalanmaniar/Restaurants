@@ -43,23 +43,66 @@ from app.services.opening_hours import is_open
 
 MAX_MATCHED_ITEMS_PER_RESTAURANT = 5
 
-
-def find_matching_restaurants(
-    db: Session, query: str,
-) -> tuple[dict[int, Restaurant], dict[int, list[str]]]:
-    """Every open restaurant whose name/cuisine/description or menu item
-    name/description matches the query, plus the customer-visible matched
-    items per restaurant.
-
-    Returns (`{restaurant_id: Restaurant}`, `{restaurant_id: [matched_item, …]}`).
-    Callers hand matched_items straight to `ranking.rank_restaurants` so
-    every matched restaurant scores relevance=1.0 (see services/ranking.py).
+# Filler words that carry no dish/cuisine meaning. The model is told to pass
+# "a keyword or short phrase from their message" and in practice it passes the
+# MESSAGE — "Biryani chaiye", "Biryani ka batao", "biryani hai". A whole-phrase
+# ILIKE matches nothing for every one of those, the tool returned empty, and the
+# empty-result note then sent the model back to list_restaurants: the customer's
+# whole discovery context was wiped by a filler word. Stripping these lets the
+# token fallback below recover the real keyword.
+#
+# Roman Urdu first (that is what customers actually type here), then English.
+_STOPWORDS = frozenset(
     """
-    trimmed = (query or "").strip()
-    if not trimmed:
+    hai h hain he ho hoti hota hote hy hei
+    chaiye chahiye chahiyay chahye mangta mangti
+    ka ki ke ko kay kaa
+    per par pe pr mein me main se sy
+    kya kia kiya kaisa kaise kon kaun kounsa
+    batao bata bataye dikhao dikha dedo dena
+    ek aik aur or kuch koi bhi to tou na nahi
+    hum mujhe mujhy mera meri
+    yeh ye wo woh is us
+    order chahta chahti
+    the a an is are am was were be been
+    i we you me my our your
+    want need give show tell about have has
+    from at in on of for with and or some any
+    please plz thanks
+    food eat
+    """.split()
+)
+
+# Two characters is never a dish. Guards against "h", "ka", "ki" surviving as
+# a LIKE term and matching essentially every row in the catalog.
+_MIN_TOKEN_LENGTH = 3
+
+
+def _significant_tokens(query: str) -> list[str]:
+    """The words in `query` worth searching on, in order, deduplicated.
+
+    Punctuation is stripped so "biryani?" and "biryani" behave identically —
+    a trailing question mark on a WhatsApp message must never change what the
+    customer gets back.
+    """
+    tokens: list[str] = []
+    for raw in query.split():
+        word = "".join(ch for ch in raw if ch.isalnum()).lower()
+        if len(word) < _MIN_TOKEN_LENGTH or word in _STOPWORDS:
+            continue
+        if word not in tokens:
+            tokens.append(word)
+    return tokens
+
+
+def _match_terms(
+    db: Session, terms: list[str],
+) -> tuple[dict[int, Restaurant], dict[int, list[str]]]:
+    """One search pass over the five columns for an OR-set of LIKE terms."""
+    if not terms:
         return {}, {}
 
-    like = f"%{trimmed}%"
+    likes = [f"%{term}%" for term in terms]
 
     restaurants_by_id: dict[int, Restaurant] = {}
     matched_items: dict[int, list[str]] = {}
@@ -75,8 +118,8 @@ def find_matching_restaurants(
             Restaurant.is_accepting_orders.is_(True),
             MenuItem.is_available.is_(True),
             or_(
-                MenuItem.name.ilike(like),
-                MenuItem.description.ilike(like),
+                *[MenuItem.name.ilike(like) for like in likes],
+                *[MenuItem.description.ilike(like) for like in likes],
             ),
         )
         .order_by(Restaurant.id, MenuItem.name)
@@ -95,9 +138,9 @@ def find_matching_restaurants(
             Restaurant.status == RestaurantStatus.ACTIVE,
             Restaurant.is_accepting_orders.is_(True),
             or_(
-                Restaurant.name.ilike(like),
-                Restaurant.cuisine_type.ilike(like),
-                Restaurant.description.ilike(like),
+                *[Restaurant.name.ilike(like) for like in likes],
+                *[Restaurant.cuisine_type.ilike(like) for like in likes],
+                *[Restaurant.description.ilike(like) for like in likes],
             ),
         )
     ).all()
@@ -115,6 +158,47 @@ def find_matching_restaurants(
         rid: r for rid, r in restaurants_by_id.items() if is_open(r)
     }
     return open_only, {rid: matched_items[rid] for rid in open_only}
+
+
+def find_matching_restaurants(
+    db: Session, query: str,
+) -> tuple[dict[int, Restaurant], dict[int, list[str]]]:
+    """Every open restaurant whose name/cuisine/description or menu item
+    name/description matches the query, plus the customer-visible matched
+    items per restaurant.
+
+    Returns (`{restaurant_id: Restaurant}`, `{restaurant_id: [matched_item, …]}`).
+    Callers hand matched_items straight to `ranking.rank_restaurants` so
+    every matched restaurant scores relevance=1.0 (see services/ranking.py).
+
+    Two passes, in order:
+
+      1. The whole phrase as one LIKE term. Exact and precise — "chicken
+         biryani" only matches things that literally contain that phrase.
+      2. If (and only if) pass 1 found nothing, retry on the individual
+         significant words (filler stripped, see `_STOPWORDS`). This is what
+         makes "Biryani chaiye", "biryani hai" and "Biryani ka batao" land on
+         the biryani restaurants instead of returning empty and triggering a
+         full restaurant-list reset in the agent.
+
+    Pass 1 runs first so the phrase result always wins when it exists: token
+    matching is deliberately broader and would otherwise dilute a good
+    multi-word query with single-word noise.
+    """
+    trimmed = (query or "").strip()
+    if not trimmed:
+        return {}, {}
+
+    restaurants, matched = _match_terms(db, [trimmed])
+    if restaurants:
+        return restaurants, matched
+
+    tokens = _significant_tokens(trimmed)
+    # Nothing to gain from re-running an identical single-term search.
+    if not tokens or tokens == [trimmed.lower()]:
+        return {}, {}
+
+    return _match_terms(db, tokens)
 
 
 def _cheapest_available_item(db: Session, restaurant_id: int) -> MenuItem | None:

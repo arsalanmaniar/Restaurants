@@ -218,22 +218,27 @@ class TestFindRestaurantsTool:
         names = {r["name"] for r in result["restaurants"]}
         assert {"Karachi Biryani House", "Pizza Junction", "Wok & Roll"} <= names
 
-    def test_case4_tool_is_read_only_no_state_mutation(
+    def test_case4_tool_does_not_touch_order_state(
         self, db, conversation,
     ):
-        """CASE 4 — find_restaurants must NEVER mutate conversation state
-        (no shown_menu_ids grounding, no cart change, no active_restaurant
-        change). The order flow depends on those being set only by get_menu
-        / add_to_cart."""
+        """CASE 4 — a plain discovery query must not touch anything the ORDER
+        flow depends on: no cart change, no `shown_menu_ids` grounding, no
+        active restaurant. Those may only be set by get_menu / add_to_cart,
+        which is what stops a hallucinated item id becoming an order line.
+
+        It DOES now record `shown_restaurants` (the candidate list it just
+        presented) — that key is read only by the discovery path and by the
+        agent's system message, never by the add_to_cart grounding guard."""
         before_cart = dict(conversation.cart or {})
-        before_context = dict(conversation.context or {})
         before_active = conversation.active_restaurant_id
 
         tools.find_restaurants(db, conversation, query="biryani")
 
+        context = conversation.context or {}
         assert (conversation.cart or {}) == before_cart
-        assert (conversation.context or {}) == before_context
         assert conversation.active_restaurant_id == before_active
+        assert "shown_menu_ids" not in context
+        assert "shown_menu" not in context
 
     def test_empty_query_returns_error(self, db, conversation):
         result = tools.find_restaurants(db, conversation, query="")
