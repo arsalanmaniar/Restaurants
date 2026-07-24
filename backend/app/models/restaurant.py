@@ -17,6 +17,11 @@ class Restaurant(Base, TimestampMixin):
     address: Mapped[str | None] = mapped_column(Text)
     cuisine_type: Mapped[str | None] = mapped_column(String(64), index=True)
     logo_url: Mapped[str | None] = mapped_column(String(512))
+    # A publicly reachable image of the WHOLE menu, sent to the customer on
+    # WhatsApp when they ask for a menu picture. We store the URL only (the file
+    # is hosted elsewhere) — WhatsApp requires a public imageUrl, and this backend
+    # has no file storage. Per-category images live on MenuCategory instead.
+    menu_image_url: Mapped[str | None] = mapped_column(String(512))
 
     status: Mapped[RestaurantStatus] = mapped_column(
         Enum(RestaurantStatus, name="restaurant_status"),

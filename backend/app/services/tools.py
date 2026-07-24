@@ -10,6 +10,7 @@ gets fed back to the model as the tool result. Rules that matter:
     recover conversationally, rather than raising and killing the turn.
 """
 
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -28,6 +29,7 @@ from app.services import upsell as upsell_service
 from app.services.opening_hours import is_open
 from app.services.payments.registry import available_methods, provider_for_method
 from app.services.payments.service import start_payment
+from app.services.whatsapp import WhatsAppError, send_image
 
 from app.models import (
     Conversation,
@@ -49,6 +51,8 @@ from app.models import (
     Restaurant,
     RestaurantStatus,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_QUANTITY_PER_LINE = 50
 
@@ -755,8 +759,15 @@ def get_menu(
     context["shown_menu_restaurant"] = restaurant.name
     conversation.context = context
 
+    # Does this restaurant have a menu photo we could send? (whole-menu image, or
+    # any category image). Lets the model OFFER a picture without a second lookup.
+    has_menu_image = bool(restaurant.menu_image_url) or any(
+        c.menu_image_url for c in restaurant.categories
+    )
+
     return {
         "restaurant": {"id": restaurant.id, "name": restaurant.name},
+        "menu_image_available": has_menu_image,
         "items": [
             {
                 "id": i.id,
@@ -767,6 +778,97 @@ def get_menu(
             }
             for i in items
         ],
+    }
+
+
+def send_menu_image(
+    db: Session,
+    conversation: Conversation,
+    restaurant_id: int | str | None = None,
+    restaurant_name: str | None = None,
+) -> dict:
+    """Send the restaurant's menu photo(s) to the customer on WhatsApp.
+
+    Use when the customer asks for a picture of the menu ("menu ki pic/tasveer/
+    photo bhejo", "send me the menu picture"), or to offer one when a menu image
+    is available. Sends the whole-menu image if the restaurant has one; otherwise
+    sends each category's image. If neither exists, returns no_image so you fall
+    back to showing the text menu instead — never claim a picture was sent.
+
+    Unlike other tools this one has a SIDE EFFECT: it actually delivers the image
+    to the customer. Your text reply then complements it (e.g. "menu ki tasveer
+    bhej di hai — kya order karna chahenge?"). Do not also type the image URL.
+    """
+    restaurant = _resolve_restaurant(db, restaurant_id, restaurant_name)
+    if restaurant is None:
+        return {
+            "error": "unknown_restaurant",
+            "message": (
+                "No restaurant matched that. Call list_restaurants and use an "
+                "id or name from the result."
+            ),
+        }
+
+    # Whole-menu image wins; otherwise gather per-category images in menu order.
+    images: list[tuple[str, str]] = []
+    if restaurant.menu_image_url:
+        images.append((restaurant.menu_image_url, f"{restaurant.name} — menu"))
+    else:
+        for category in sorted(restaurant.categories, key=lambda c: (c.sort_order, c.id)):
+            if category.menu_image_url:
+                images.append(
+                    (category.menu_image_url, f"{restaurant.name} — {category.name}")
+                )
+
+    if not images:
+        return {
+            "no_image": True,
+            "message": (
+                f"{restaurant.name} has no menu picture available. Show the text "
+                "menu from get_menu instead — do NOT tell the customer a picture "
+                "was sent."
+            ),
+        }
+
+    sent = 0
+    for url, caption in images:
+        try:
+            send_image(conversation.customer.whatsapp_number, url, caption)
+        except WhatsAppError:
+            logger.exception(
+                "could not send menu image for %s to %s",
+                restaurant.name,
+                conversation.customer.whatsapp_number,
+            )
+            continue
+        # Log each sent image into the transcript, like any other outbound.
+        from app.services import conversations as convo
+
+        convo.log_message(
+            db,
+            conversation,
+            MessageDirection.OUTBOUND,
+            f"[Menu image sent: {caption}]",
+            meta={"menu_image_url": url},
+        )
+        sent += 1
+
+    if sent == 0:
+        return {
+            "error": "send_failed",
+            "message": (
+                "The menu picture could not be delivered right now. Offer the text "
+                "menu instead."
+            ),
+        }
+
+    return {
+        "sent": sent,
+        "restaurant": restaurant.name,
+        "message": (
+            f"Sent {sent} menu image(s) to the customer. Follow up with a short "
+            "text reply — do not repeat the image URL."
+        ),
     }
 
 
@@ -1807,6 +1909,7 @@ TOOL_IMPLS = {
     "search_restaurants_by_item": search_restaurants_by_item,
     "find_restaurants": find_restaurants,
     "get_menu": get_menu,
+    "send_menu_image": send_menu_image,
     "list_active_deals": list_active_deals,
     "suggest_addons": suggest_addons,
     "add_to_cart": add_to_cart,

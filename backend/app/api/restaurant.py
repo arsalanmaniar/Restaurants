@@ -28,6 +28,7 @@ from app.models import (
 from app.schemas import (
     CategoryIn,
     CategoryOut,
+    CategoryPatch,
     MenuItemIn,
     MenuItemOut,
     MenuItemPatch,
@@ -271,6 +272,28 @@ def list_categories(principal: CurrentStaff, db: DbSession) -> list[MenuCategory
 def create_category(payload: CategoryIn, principal: CurrentStaff, db: DbSession) -> MenuCategory:
     category = MenuCategory(restaurant_id=principal.restaurant_id, **payload.model_dump())
     db.add(category)
+    db.commit()
+    db.refresh(category)
+    return category
+
+
+def _owned_category(db: DbSession, category_id: int, restaurant_id: int) -> MenuCategory:
+    category = db.get(MenuCategory, category_id)
+    # 404 rather than 403 on another restaurant's category: don't confirm it exists.
+    if category is None or category.restaurant_id != restaurant_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Category not found")
+    return category
+
+
+@router.patch("/categories/{category_id}", response_model=CategoryOut)
+def update_category(
+    category_id: int, payload: CategoryPatch, principal: CurrentStaff, db: DbSession
+) -> MenuCategory:
+    """Patch a category — the dashboard uses this to attach a per-category menu
+    image to a category that already exists (or rename / reorder it)."""
+    category = _owned_category(db, category_id, principal.restaurant_id)
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(category, field, value)
     db.commit()
     db.refresh(category)
     return category

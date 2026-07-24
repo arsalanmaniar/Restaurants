@@ -141,6 +141,37 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "send_menu_image",
+            "description": (
+                "Send the restaurant's menu as a PICTURE to the customer on "
+                "WhatsApp. Call this when the customer asks for a photo of the menu "
+                "(e.g. 'menu ki pic bhejo', 'menu ki tasveer', 'send the menu "
+                "picture'), or to offer one when get_menu reported "
+                "menu_image_available: true. It actually delivers the image, so "
+                "afterwards just add a short text reply — do not paste the image "
+                "URL. If the restaurant has no menu picture the result says "
+                "no_image; then show the text menu instead and do NOT claim a "
+                "picture was sent. Identify the restaurant by id or name."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "restaurant_id": {
+                        "type": "string",
+                        "description": "The restaurant's id from list_restaurants.",
+                    },
+                    "restaurant_name": {
+                        "type": "string",
+                        "description": "The restaurant's name, e.g. 'Pizza Junction'.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_active_deals",
             "description": (
                 "Check whether a restaurant has any promotional deals running RIGHT "

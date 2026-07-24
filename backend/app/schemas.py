@@ -39,11 +39,23 @@ class CategoryOut(ORMModel):
     name: str
     sort_order: int
     is_active: bool
+    menu_image_url: str | None = None
 
 
 class CategoryIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     sort_order: int = 0
+    menu_image_url: str | None = Field(default=None, max_length=512)
+
+
+class CategoryPatch(BaseModel):
+    """All-optional — the dashboard patches one field at a time (e.g. attaching a
+    per-category menu image to a category that already exists)."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    sort_order: int | None = None
+    is_active: bool | None = None
+    menu_image_url: str | None = Field(default=None, max_length=512)
 
 
 class MenuItemOut(ORMModel):
@@ -148,6 +160,7 @@ class RestaurantOut(ORMModel):
     delivery_fee: Decimal
     min_order_amount: Decimal
     is_accepting_orders: bool
+    menu_image_url: str | None = None
     subscription_plan_id: int | None
     created_at: datetime
 
@@ -214,6 +227,7 @@ class RestaurantSettingsPatch(BaseModel):
     address: str | None = None
     cuisine_type: str | None = Field(default=None, max_length=64)
     logo_url: str | None = Field(default=None, max_length=512)
+    menu_image_url: str | None = Field(default=None, max_length=512)
     delivery_fee: Decimal | None = Field(default=None, ge=0, le=Decimal("99999.99"))
     min_order_amount: Decimal | None = Field(default=None, ge=0, le=Decimal("99999.99"))
     is_accepting_orders: bool | None = None

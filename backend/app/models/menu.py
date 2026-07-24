@@ -16,6 +16,10 @@ class MenuCategory(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Optional per-category menu image (a photo of just this section's items),
+    # for restaurants that photograph their menu by category rather than as one
+    # whole-menu image on the restaurant. URL only — see Restaurant.menu_image_url.
+    menu_image_url: Mapped[str | None] = mapped_column(String(512))
 
     restaurant: Mapped["Restaurant"] = relationship(back_populates="categories")  # noqa: F821
     items: Mapped[list["MenuItem"]] = relationship(

@@ -39,10 +39,11 @@ logger = logging.getLogger(__name__)
 # (~15-30s each) before the text-only salvage path fired.
 MAX_TOOL_ROUNDS = 4
 
-# Tools that change state. Re-running one of these inside a single turn with the
-# exact same arguments is never what the customer wants — it double-adds food or
-# double-places an order. Read-only tools are free to repeat.
-MUTATING_TOOLS = {"add_to_cart", "place_order"}
+# Tools that change state or have an external side effect. Re-running one of these
+# inside a single turn with the exact same arguments is never what the customer
+# wants — it double-adds food, double-places an order, or sends the same menu image
+# twice. Read-only tools are free to repeat.
+MUTATING_TOOLS = {"add_to_cart", "place_order", "send_menu_image"}
 
 # llama emits syntactically broken tool calls fairly often; Groq rejects the whole
 # request when it does. Retrying almost always works, so retry before giving up.
@@ -227,6 +228,14 @@ only a "koi deals nahi hai" or a bare "aap kya order karna chahenge?" — withou
 the menu — is a broken turn; the customer picked this restaurant to see the food.
 4. From there: add items to the cart, ask for the full delivery address if you don't \
 have one, read the whole order back with the total, get an explicit "yes", then place it.
+
+Menu picture: if the customer asks for a PHOTO of the menu ("menu ki pic/tasveer/photo \
+bhejo", "send me the menu picture"), call `send_menu_image` for that restaurant — it \
+delivers the image to them directly. You may also OFFER a picture when get_menu returned \
+"menu_image_available": true ("menu ki tasveer bhi bhej sakta hun, chahiye?"). After \
+send_menu_image succeeds, add only a short text follow-up — never paste the image link. \
+If it returns "no_image", the restaurant has no picture: show the text menu and do NOT \
+claim a picture was sent.
 
 Address handoff — this is the single most-missed rule, get it right: if you have just \
 asked the customer for a delivery address (either inline in your previous message OR \

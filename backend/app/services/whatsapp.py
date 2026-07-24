@@ -76,3 +76,45 @@ def send_text(to: str, body: str) -> dict:
         return response.json()
     except Exception:
         return {}
+
+
+def send_image(to: str, image_url: str, caption: str | None = None) -> dict:
+    """Send an image by public URL, with an optional caption.
+
+    Same Wassender endpoint as send_text — the only difference is the `imageUrl`
+    field (verified against Wassender's send-image API). The image must be a
+    PUBLICLY reachable JPEG/PNG under 5MB; we pass the URL through untouched and
+    never host the bytes ourselves.
+    """
+    if not settings.wassender_api_key:
+        logger.warning(
+            "Wassender not configured; would send image to %s: %s", to, image_url
+        )
+        return {"sent": False, "reason": "not_configured"}
+
+    headers = {"Authorization": f"Bearer {settings.wassender_api_key}"}
+    phone = _normalize_number(to)
+    if not phone.startswith("+"):
+        phone = f"+{phone}"
+    payload: dict = {"to": phone, "imageUrl": image_url}
+    if caption:
+        payload["text"] = caption[:MAX_BODY_CHARS]
+
+    logger.info(f"Wassender image request body: {payload}")
+
+    try:
+        response = httpx.post(WASSENDER_SEND_URL, json=payload, headers=headers, timeout=20.0)
+    except httpx.RequestError as exc:
+        logger.error("Wassender image request failed: %s", exc)
+        raise WhatsAppError(str(exc)) from exc
+
+    logger.info(f"Wassender image response status: {response.status_code}")
+    logger.info(f"Wassender image response body: {response.text}")
+
+    if response.status_code >= 400:
+        raise WhatsAppError(f"Wassender returned {response.status_code}: {response.text}")
+
+    try:
+        return response.json()
+    except Exception:
+        return {}
