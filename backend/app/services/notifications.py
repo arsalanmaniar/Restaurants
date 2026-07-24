@@ -54,6 +54,8 @@ def _bill_message(order: Order) -> str:
     ]
     if order.discount_amount and order.discount_amount > 0:
         body.append(f"Discount: -Rs. {_money(order.discount_amount)}")
+    if order.tax_amount and order.tax_amount > 0:
+        body.append(f"Tax ({order.tax_rate:.0f}%): Rs. {_money(order.tax_amount)}")
     body.append(f"Delivery: Rs. {_money(order.delivery_fee)}")
     body.append(f"Total: Rs. {_money(order.total_amount)}")
     body.append("")

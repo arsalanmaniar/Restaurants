@@ -213,10 +213,20 @@ class TestPlaceOrder:
         assert cod_order.subtotal == sum(i.line_total for i in cod_order.items)
 
     def test_totals_and_commission(self, db, cod_order, pizza):
-        assert cod_order.total_amount == cod_order.subtotal + cod_order.delivery_fee
+        # Phase F — the total now includes tax. cod_order is COD, so 15% on the
+        # food subtotal (no coupon here, so taxable food == subtotal).
+        expected_tax = (cod_order.subtotal * Decimal("15") / Decimal("100")).quantize(
+            Decimal("0.01")
+        )
+        assert cod_order.tax_rate == Decimal("15.00")
+        assert cod_order.tax_amount == expected_tax
+        assert cod_order.total_amount == (
+            cod_order.subtotal + expected_tax + cod_order.delivery_fee
+        )
+        # Commission base is subtotal + tax (delivery excluded), then − discount.
         assert cod_order.commission_rate == pizza.commission_rate
         assert cod_order.commission_amount == (
-            cod_order.subtotal * pizza.commission_rate / Decimal("100")
+            (cod_order.subtotal + expected_tax) * pizza.commission_rate / Decimal("100")
         ).quantize(Decimal("0.01"))
 
     def test_empty_cart_is_refused(self, db, conversation):

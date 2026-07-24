@@ -72,6 +72,16 @@ class Order(Base, TimestampMixin):
     discount_amount: Mapped[Decimal] = mapped_column(
         Numeric(10, 2), default=Decimal("0.00"), nullable=False
     )
+    # Sales tax on the food subtotal. Rate depends on payment method (15% cash /
+    # 8% online) and is frozen at order time, like commission_rate — the rate may
+    # change later but this order's tax must not. tax_amount is included in
+    # total_amount. Default 0 so orders placed before tax shipped read cleanly.
+    tax_rate: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("0.00"), nullable=False
+    )
+    tax_amount: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), default=Decimal("0.00"), nullable=False
+    )
     total_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     # Frozen at order time — the restaurant's rate may change later, but this order's
     # commission must not.

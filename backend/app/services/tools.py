@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import settings
+from app.services import billing
 from app.services import coupons as coupons_service
 from app.services import discovery as discovery_service
 from app.services import promotions as promotions_service
@@ -1068,6 +1069,89 @@ def _has_any_outbound(db: Session, conversation: Conversation) -> bool:
     )
 
 
+def preview_bill(
+    db: Session,
+    conversation: Conversation,
+    payment_method: str = "cod",
+    coupon_code: str | None = None,
+) -> dict:
+    """The exact bill place_order will produce for the current cart and payment
+    method — READ ONLY, nothing is placed or mutated.
+
+    The tax rate depends on the payment method (cash is taxed higher than
+    online), so the customer's total is not known until they have chosen how to
+    pay. This is what lets the model read the correct taxed total back BEFORE
+    placing the order, without ever doing the arithmetic itself. place_order
+    recomputes everything from scratch and never trusts these numbers.
+    """
+    lines = list((conversation.cart or {}).get("items", []))
+    if not lines:
+        return {"error": "The cart is empty — nothing to bill yet."}
+
+    restaurant = db.get(Restaurant, cart_restaurant(conversation) or 0)
+    if restaurant is None:
+        return {"error": "No restaurant is associated with the current cart."}
+
+    try:
+        method = PaymentMethod(payment_method.lower())
+    except ValueError:
+        return {"error": f"Unknown payment method {payment_method!r}."}
+
+    subtotal = sum(Decimal(line["price"]) * line["quantity"] for line in lines)
+
+    # Coupons are validated read-only here (no redemption recorded) so the
+    # previewed total matches what place_order will actually charge.
+    discount_amount = Decimal("0.00")
+    coupon_note = None
+    if coupon_code:
+        try:
+            application = coupons_service.validate_coupon(
+                db,
+                code=coupon_code,
+                restaurant_id=restaurant.id,
+                customer_id=conversation.customer_id,
+                subtotal=subtotal,
+            )
+            discount_amount = application.discount_amount
+        except coupons_service.CouponError as exc:
+            coupon_note = f"Coupon not applied: {exc}"
+
+    bill = billing.compute_bill(
+        subtotal=subtotal,
+        delivery_fee=restaurant.delivery_fee,
+        discount=discount_amount,
+        method=method,
+    )
+
+    result = {
+        "restaurant": restaurant.name,
+        "payment_method": method.value,
+        "subtotal": _money(subtotal),
+        "tax_rate": _money(bill.tax_rate),
+        "tax_amount": _money(bill.tax_amount),
+        "delivery_fee": _money(bill.delivery_fee),
+        "discount_amount": _money(discount_amount),
+        "total": _money(bill.total),
+        "items": [
+            {
+                "name": line["name"],
+                "quantity": line["quantity"],
+                "line_total": _money(Decimal(line["price"]) * line["quantity"]),
+            }
+            for line in lines
+        ],
+    }
+    # A preview below the minimum is not an error (the customer may add more) —
+    # just tell the model so it can nudge rather than silently show a total that
+    # place_order will later reject.
+    if subtotal < restaurant.min_order_amount:
+        result["below_minimum"] = True
+        result["minimum_order"] = _money(restaurant.min_order_amount)
+    if coupon_note:
+        result["coupon_note"] = coupon_note
+    return result
+
+
 def _consume_shared_location(conversation: Conversation) -> tuple[float, float] | None:
     """Pull a map pin the customer shared (via the webhook) out of conversation
     context, and clear it so a later order in the same chat can't inherit stale
@@ -1214,6 +1298,24 @@ def place_order(
     if resolved_contact_name and not customer.name:
         customer.name = resolved_contact_name
 
+    # Payment method is resolved FIRST, before any money is computed — the tax
+    # rate (and therefore the total the customer pays and the amount we later ask
+    # the gateway to collect) depends on it. Getting this ordering wrong is how a
+    # cash total ends up on an online payment link. See services/billing.py.
+    try:
+        method = PaymentMethod(payment_method.lower())
+    except ValueError:
+        return {"error": f"Unknown payment method {payment_method!r}."}
+
+    if method not in available_methods():
+        return {
+            "error": "unavailable_payment_method",
+            "message": (
+                f"{method.value} is not available. "
+                f"Offer: {', '.join(m.value for m in available_methods())}."
+            ),
+        }
+
     # Prices come from the cart snapshot, never from the model's arguments.
     subtotal = sum(Decimal(line["price"]) * line["quantity"] for line in lines)
 
@@ -1246,29 +1348,29 @@ def place_order(
         applied_coupon = application.coupon
         discount_amount = application.discount_amount
 
+    # The bill — subtotal, tax (rate from the payment method), delivery, total —
+    # is computed in ONE place shared with preview_bill, so the total the customer
+    # confirmed in the read-back is exactly the total we store and charge.
     delivery_fee = restaurant.delivery_fee
-    total = subtotal + delivery_fee - discount_amount
+    bill = billing.compute_bill(
+        subtotal=subtotal,
+        delivery_fee=delivery_fee,
+        discount=discount_amount,
+        method=method,
+    )
+    total = bill.total
+
     commission_rate = restaurant.commission_rate
-    # Commission on the FULL subtotal first, then reduced by the discount — the
+    # Commission base is subtotal + tax (the food and its tax; the delivery fee is
+    # a pass-through and stays out of it). Then reduced by the discount — the
     # restaurant is paid as if no coupon existed. Clamped at zero: a coupon bigger
     # than the commission means the platform is paying to acquire the order, which
     # is a legitimate choice, but platform revenue must never go negative for it.
-    raw_commission = (subtotal * commission_rate / Decimal("100")).quantize(Decimal("0.01"))
+    commission_base = subtotal + bill.tax_amount
+    raw_commission = (commission_base * commission_rate / Decimal("100")).quantize(
+        Decimal("0.01")
+    )
     commission_amount = max(raw_commission - discount_amount, Decimal("0.00"))
-
-    try:
-        method = PaymentMethod(payment_method.lower())
-    except ValueError:
-        return {"error": f"Unknown payment method {payment_method!r}."}
-
-    if method not in available_methods():
-        return {
-            "error": "unavailable_payment_method",
-            "message": (
-                f"{method.value} is not available. "
-                f"Offer: {', '.join(m.value for m in available_methods())}."
-            ),
-        }
 
     # A prepaid order must NOT reach the kitchen until the money lands.
     prepaid = method != PaymentMethod.COD
@@ -1288,6 +1390,8 @@ def place_order(
         subtotal=subtotal,
         delivery_fee=delivery_fee,
         discount_amount=discount_amount,
+        tax_rate=bill.tax_rate,
+        tax_amount=bill.tax_amount,
         total_amount=total,
         commission_rate=commission_rate,
         commission_amount=commission_amount,
@@ -1347,6 +1451,8 @@ def place_order(
         "order_number": order.order_number,
         "restaurant": restaurant.name,
         "subtotal": _money(subtotal),
+        "tax_rate": _money(bill.tax_rate),
+        "tax_amount": _money(bill.tax_amount),
         "delivery_fee": _money(delivery_fee),
         "discount_amount": _money(discount_amount),
         "total": _money(total),
@@ -1705,6 +1811,7 @@ TOOL_IMPLS = {
     "suggest_addons": suggest_addons,
     "add_to_cart": add_to_cart,
     "clear_cart": clear_cart,
+    "preview_bill": preview_bill,
     "place_order": place_order,
     "get_order_status": get_order_status,
     "find_past_order": find_past_order,

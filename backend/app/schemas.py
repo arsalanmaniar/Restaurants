@@ -99,6 +99,8 @@ class OrderOut(ORMModel):
     status: OrderStatus
     subtotal: Decimal
     delivery_fee: Decimal
+    tax_rate: Decimal = Decimal("0.00")
+    tax_amount: Decimal = Decimal("0.00")
     total_amount: Decimal
     commission_amount: Decimal
     delivery_address_text: str | None

@@ -224,6 +224,46 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "preview_bill",
+            "description": (
+                "Get the exact bill for the current cart BEFORE placing the order: "
+                "subtotal, tax, delivery fee, and total. READ ONLY — it places "
+                "nothing. The tax rate depends on how the customer pays (cash is "
+                "taxed higher than online), so call this ONLY AFTER the customer "
+                "has chosen a payment method, passing that method. Read the "
+                "returned numbers back to the customer as the order summary, then "
+                "get their confirmation, then call place_order with the SAME "
+                "payment method. Never compute subtotal/tax/total yourself — always "
+                "use the numbers this returns."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "payment_method": {
+                        "type": "string",
+                        "enum": ["cod", "jazzcash", "easypaisa"],
+                        "description": (
+                            "The method the customer chose. Determines the tax rate "
+                            "(cod is taxed higher than online), so the total changes "
+                            "with it. Defaults to cod."
+                        ),
+                    },
+                    "coupon_code": {
+                        "type": "string",
+                        "description": (
+                            "A coupon code the customer wants applied, if they "
+                            "mentioned one, so the preview reflects the discount. "
+                            "Omit if none."
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "place_order",
             "description": (
                 "Place the order for everything in the cart. Only call this AFTER you have "

@@ -33,8 +33,17 @@ def _make_coupon(db, **kwargs) -> Coupon:
 
 class TestCommissionMath:
     def test_worked_example_from_the_spec(self, db, conversation, pizza, menu_item):
-        """Rs. 2000 subtotal, Rs. 200 coupon, 15% commission -> commission = Rs. 100,
-        NOT 15% of the discounted 1800."""
+        """Phase F worked example. Rs. 2000 subtotal, Rs. 200 coupon, COD (15% tax),
+        15% commission:
+
+          taxable food  = 2000 − 200        = 1800
+          tax           = 15% × 1800        = 270.00
+          commission    = 15% × (2000+270)  = 340.50, then − 200 discount = 140.50
+          total         = 2000 + 270 + delivery − 200
+
+        Commission is still on the FULL food (now food + its tax), NOT the
+        discounted 1800 — the coupon is the platform's cost, applied at the end.
+        """
         pizza.commission_rate = Decimal("15.00")
         pizza.min_order_amount = Decimal("0.00")
         menu_item.price = Decimal("2000.00")
@@ -53,10 +62,12 @@ class TestCommissionMath:
         order = db.scalar(select(Order).where(Order.order_number == result["order_number"]))
         assert order.subtotal == Decimal("2000.00")
         assert order.discount_amount == Decimal("200.00")
-        assert order.commission_amount == Decimal("100.00")
-        # The restaurant is paid on the FULL subtotal — the coupon is entirely the
-        # platform's cost, not deducted from what the restaurant earns.
-        assert order.total_amount == order.subtotal + order.delivery_fee - order.discount_amount
+        assert order.tax_amount == Decimal("270.00")
+        assert order.commission_amount == Decimal("140.50")
+        # total = subtotal + tax + delivery − discount.
+        assert order.total_amount == (
+            order.subtotal + order.tax_amount + order.delivery_fee - order.discount_amount
+        )
 
     def test_commission_clamps_at_zero_never_negative(self, db, conversation, pizza, menu_item):
         """A coupon bigger than the commission is the platform paying to acquire the
