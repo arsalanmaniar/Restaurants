@@ -1368,6 +1368,17 @@ def place_order(
         )
 
     if not prepaid:
+        # The order is RECEIVED, not yet confirmed — it sits at PENDING until the
+        # restaurant accepts it from their dashboard, at which point the customer
+        # is sent the bill automatically (see services/notifications.py). Tell the
+        # model to set that expectation instead of declaring the order confirmed.
+        result["message"] = (
+            "Order received and sent to the restaurant. It is NOT confirmed yet — "
+            "the restaurant will accept it shortly and the customer will then get "
+            "the full bill automatically. Give the customer their order number and "
+            "say it is being confirmed by the restaurant; do NOT tell them it is "
+            "already confirmed, and do NOT type out a bill yourself."
+        )
         return result
 
     payment, link = start_payment(db, order, provider_for_method(method))

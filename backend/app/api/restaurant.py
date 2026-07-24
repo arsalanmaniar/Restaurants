@@ -7,7 +7,7 @@ staff at restaurant A cannot read or mutate restaurant B's rows by guessing ids.
 
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 
@@ -46,9 +46,15 @@ from app.schemas import (
     WorkingHoursReplace,
 )
 from app.models import Promotion
+from app.services import notifications as notifications_service
 from app.services import promotions as promotions_service
 from app.services import reports as reports_service
 from app.services.opening_hours import is_open
+
+# Dashboard transitions the customer is told about on WhatsApp. ACCEPTED sends the
+# bill (the customer's "confirmed" moment), CANCELLED sends an apology. Other
+# transitions (PREPARING, READY, ...) are internal-only for now.
+NOTIFY_CUSTOMER_ON = {OrderStatus.ACCEPTED, OrderStatus.CANCELLED}
 
 router = APIRouter(prefix="/restaurant", tags=["restaurant"])
 
@@ -371,7 +377,11 @@ def list_orders(
 
 @router.patch("/orders/{order_id}/status", response_model=OrderOut)
 def update_order_status(
-    order_id: int, payload: OrderStatusUpdate, principal: CurrentStaff, db: DbSession
+    order_id: int,
+    payload: OrderStatusUpdate,
+    principal: CurrentStaff,
+    db: DbSession,
+    background: BackgroundTasks,
 ) -> Order:
     order = db.get(Order, order_id)
     if order is None or order.restaurant_id != principal.restaurant_id:
@@ -408,8 +418,13 @@ def update_order_status(
 
     db.commit()
     db.refresh(order)
-    # TODO(V1): notify the customer on WhatsApp here. Blocked on the 24h-window /
-    # template question — see the note in services/whatsapp.py.
+
+    # Tell the customer on WhatsApp — the bill on ACCEPTED, an apology on CANCELLED.
+    # Off the request path: a slow Wassender call must not block the dashboard, and
+    # a delivery failure must not roll back the status change the restaurant just made.
+    if payload.status in NOTIFY_CUSTOMER_ON:
+        background.add_task(notifications_service.notify_order_status, order.id)
+
     return order
 
 

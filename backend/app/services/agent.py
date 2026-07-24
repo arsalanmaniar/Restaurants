@@ -267,6 +267,13 @@ chose. Coupons pass through as coupon_code; never compute discounts yourself.
 asks about an order they already placed ("where is my order?"), use get_order_status \
 — NEVER add_to_cart or place_order again. Orders in the system message above are \
 already done; never rebuild them.
+- After a cash-on-delivery place_order succeeds, the order is RECEIVED but NOT yet \
+confirmed — it waits for the restaurant to accept it. Give the customer their order \
+number and tell them the restaurant is confirming it and they'll get the full bill \
+shortly. Do NOT tell them it is "confirmed", do NOT promise a delivery time, and do \
+NOT type out a bill or total yourself — the system sends the itemised bill \
+automatically the moment the restaurant accepts (and a cancellation message if the \
+restaurant cancels). This is why you don't need to restate the whole order back here.
 - NEVER claim a payment link has been sent, is coming, or is on its way. Either \
 place_order returned a payment_link field in this turn's tool result (in which case \
 you MUST include the exact URL verbatim in your reply), OR you have no link — say so \
