@@ -25,9 +25,8 @@ Two things this endpoint must get right:
     into an infinite retry storm.
 
 Non-text messages (images/audio/etc.) simply arrive without a `messageBody` and
-are dropped silently by the empty-body guard below. If we ever want to reply
-"text only please" for media, we need to identify which field carries the message
-type in Wassender's real payload (not in the spec yet).
+are dropped silently by the empty-body guard below. The ONE exception we now
+handle is a shared LOCATION pin — see `_extract_location`.
 """
 
 import logging
@@ -62,6 +61,40 @@ def _dig(source, *keys, default=None):
             return default
         node = node.get(key)
     return node if node is not None else default
+
+
+def _extract_location(payload: dict) -> tuple[float, float] | None:
+    """Pull (lat, lng) out of a WhatsApp location-pin message, or None.
+
+    ⚠️ FIELD PATH UNVERIFIED against a real Wassender location payload. It is
+    inferred from the text-message shape we DO have: `data.messages.message`
+    carries a `conversation` key (visible in the module docstring), which is the
+    Baileys library's representation — and Wassender is Baileys-based. In Baileys
+    a location arrives as `message.locationMessage.{degreesLatitude,
+    degreesLongitude}`. We try that first, then a couple of common fallbacks, so
+    a slightly different real shape still has a chance of matching.
+
+    Safe either way: if none of the paths match, this returns None and the
+    message falls through to the existing "empty message" drop — exactly the
+    behaviour before this change, so an unverified path can never REGRESS the
+    text flow, only fail to add the new capability. The full raw payload is
+    already logged on entry, so the first real location pin in the logs is all
+    anyone needs to confirm or correct the path.
+    """
+    msg = _dig(payload, "data", "messages", "message")
+    if not isinstance(msg, dict):
+        return None
+    loc = msg.get("locationMessage") or msg.get("location")
+    if not isinstance(loc, dict):
+        return None
+    lat = loc.get("degreesLatitude", loc.get("latitude"))
+    lng = loc.get("degreesLongitude", loc.get("longitude"))
+    if lat is None or lng is None:
+        return None
+    try:
+        return float(lat), float(lng)
+    except (TypeError, ValueError):
+        return None
 
 
 @router.post("/webhooks/wassender")
@@ -112,6 +145,17 @@ async def wassender_webhook(
     body = (_dig(payload, "data", "messages", "messageBody") or "").strip()
     message_id = _dig(payload, "data", "messages", "id") or _dig(payload, "data", "messages", "key", "id")
 
+    # A shared location pin has no messageBody. Turn it into text the AI can act
+    # on (a maps link), and pass the structured coordinates through so place_order
+    # can store them. A pin that also has a caption keeps the caption as the body.
+    location = _extract_location(payload)
+    if location is not None and not body:
+        lat, lng = location
+        body = (
+            "[The customer shared their delivery location as a map pin: "
+            f"https://maps.google.com/?q={lat},{lng}]"
+        )
+
     if not sender or not body:
         return {"status": "ignored", "reason": "empty message"}
 
@@ -124,11 +168,16 @@ async def wassender_webhook(
 
     # Do the AI work off the request path: Wassender times out fast, and a slow
     # Groq call would otherwise trigger a retry (and a duplicate reply).
-    background.add_task(_process_message, sender, body, message_id)
+    background.add_task(_process_message, sender, body, message_id, location)
     return {"status": "accepted"}
 
 
-def _process_message(sender: str, body: str, message_id: str | None) -> None:
+def _process_message(
+    sender: str,
+    body: str,
+    message_id: str | None,
+    location: tuple[float, float] | None = None,
+) -> None:
     db: Session = SessionLocal()
     try:
         if message_id and convo.already_processed(db, message_id):
@@ -145,6 +194,14 @@ def _process_message(sender: str, body: str, message_id: str | None) -> None:
             return
 
         conversation = convo.get_or_create_conversation(db, customer)
+
+        # Stash a shared map pin so place_order can attach it to the order. Kept in
+        # conversation context (not just the message text) so the coordinates stay
+        # structured — the model never has to re-type a lat/lng back to us.
+        if location is not None:
+            ctx = dict(conversation.context or {})
+            ctx["delivery_location"] = {"lat": location[0], "lng": location[1]}
+            conversation.context = ctx
 
         convo.log_message(
             db,

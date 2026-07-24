@@ -4,6 +4,7 @@ from decimal import Decimal
 from sqlalchemy import (
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -43,6 +44,19 @@ class Order(Base, TimestampMixin):
     )
     # Snapshot: the address as it was at order time, even if the customer edits it later.
     delivery_address_text: Mapped[str | None] = mapped_column(Text)
+    # Who receives the delivery + the number the rider should call. Snapshots, like
+    # delivery_address_text — captured at order time and never rewritten if the
+    # customer later edits their profile. contact_phone MAY differ from the WhatsApp
+    # number the customer is messaging from (they might give a landline, or someone
+    # else's mobile for the person receiving the food).
+    contact_name: Mapped[str | None] = mapped_column(String(120))
+    contact_phone: Mapped[str | None] = mapped_column(String(32))
+    # Delivery location as a map pin, when the customer shared one on WhatsApp.
+    # Snapshot on the order rather than only on customer_addresses, matching the
+    # delivery_address_text snapshot pattern — a saved address may not be the one
+    # this order goes to. NULL when the customer only gave a text address.
+    delivery_lat: Mapped[float | None] = mapped_column(Float)
+    delivery_lng: Mapped[float | None] = mapped_column(Float)
 
     status: Mapped[OrderStatus] = mapped_column(
         Enum(OrderStatus, name="order_status"),

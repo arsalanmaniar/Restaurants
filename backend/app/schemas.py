@@ -102,6 +102,12 @@ class OrderOut(ORMModel):
     total_amount: Decimal
     commission_amount: Decimal
     delivery_address_text: str | None
+    # Delivery contact snapshots (Phase D). contact_phone may differ from the
+    # customer's WhatsApp number; both are None on orders placed before this shipped.
+    contact_name: str | None = None
+    contact_phone: str | None = None
+    delivery_lat: float | None = None
+    delivery_lng: float | None = None
     notes: str | None
     placed_at: datetime
     items: list[OrderItemOut]

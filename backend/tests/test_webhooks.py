@@ -169,3 +169,54 @@ class TestMessageProcessing:
 
         client.post(WEBHOOK, json=INBOUND)
         assert no_ai == []
+
+
+class TestLocationPin:
+    """Phase D — a shared WhatsApp location pin (Baileys `locationMessage` shape).
+    FIELD PATH is inferred, not verified against a real Wassender location payload;
+    see api/webhooks.py::_extract_location."""
+
+    def _location_payload(self, lat: float, lng: float) -> dict:
+        payload = _with()
+        payload["data"]["messages"].pop("messageBody", None)  # a pin has no text body
+        payload["data"]["messages"]["message"] = {
+            "locationMessage": {"degreesLatitude": lat, "degreesLongitude": lng}
+        }
+        return payload
+
+    def test_extract_location_parses_the_baileys_shape(self):
+        from app.api.webhooks import _extract_location
+
+        payload = self._location_payload(24.8607, 67.0011)
+        assert _extract_location(payload) == (24.8607, 67.0011)
+
+    def test_extract_location_none_for_a_text_message(self):
+        from app.api.webhooks import _extract_location
+
+        assert _extract_location(INBOUND) is None
+
+    def test_pin_becomes_text_the_ai_can_read(self, client, no_ai):
+        client.post(WEBHOOK, json=self._location_payload(24.8607, 67.0011))
+        assert len(no_ai) == 1
+        assert "map pin" in no_ai[0].lower()
+        assert "24.8607,67.0011" in no_ai[0]
+
+    def test_pin_coordinates_are_stashed_in_conversation_context(self, db, client, no_ai):
+        from app.services import conversations as convo
+
+        client.post(WEBHOOK, json=self._location_payload(24.8607, 67.0011))
+
+        customer = convo.get_or_create_customer(db, "923001234567")
+        conversation = convo.get_or_create_conversation(db, customer)
+        assert conversation.context["delivery_location"] == {"lat": 24.8607, "lng": 67.0011}
+
+    def test_media_without_a_location_is_still_ignored(self, client, no_ai):
+        """Regression guard: the new location branch must not resurrect other
+        media types. A message with a non-location `message` object and no body
+        still drops, exactly as before."""
+        payload = _with()
+        payload["data"]["messages"].pop("messageBody", None)
+        payload["data"]["messages"]["message"] = {"imageMessage": {"url": "x"}}
+
+        assert client.post(WEBHOOK, json=payload).json()["status"] == "ignored"
+        assert no_ai == []

@@ -1068,6 +1068,29 @@ def _has_any_outbound(db: Session, conversation: Conversation) -> bool:
     )
 
 
+def _consume_shared_location(conversation: Conversation) -> tuple[float, float] | None:
+    """Pull a map pin the customer shared (via the webhook) out of conversation
+    context, and clear it so a later order in the same chat can't inherit stale
+    coordinates. Returns (lat, lng) or None.
+
+    The webhook stores this under context['delivery_location'] when WhatsApp
+    delivers a location-type message (see api/webhooks.py)."""
+    context = conversation.context or {}
+    loc = context.get("delivery_location")
+    if not isinstance(loc, dict):
+        return None
+    lat, lng = loc.get("lat"), loc.get("lng")
+    new_context = dict(context)
+    new_context.pop("delivery_location", None)
+    conversation.context = new_context
+    if lat is None or lng is None:
+        return None
+    try:
+        return float(lat), float(lng)
+    except (TypeError, ValueError):
+        return None
+
+
 def place_order(
     db: Session,
     conversation: Conversation,
@@ -1076,6 +1099,8 @@ def place_order(
     notes: str | None = None,
     coupon_code: str | None = None,
     link_to_order_number: str | None = None,
+    contact_name: str | None = None,
+    contact_phone: str | None = None,
 ) -> dict:
     lines = list((conversation.cart or {}).get("items", []))
     if not lines:
@@ -1161,13 +1186,33 @@ def place_order(
 
     customer = conversation.customer
 
+    # A shared map pin can stand in for a typed address — but only as a fallback,
+    # because a pin alone rarely has a flat/house number. Consumed here (and cleared
+    # from context) whether or not it ends up being the primary address.
+    location = _consume_shared_location(conversation)
+
     address_text = delivery_address
     if not address_text:
         default = next((a for a in customer.addresses if a.is_default), None)
         address_text = default.address_text if default else None
+    if not address_text and location is not None:
+        # No typed address, but we have coordinates — use a map link as the
+        # address text so the order is deliverable rather than blocked.
+        address_text = f"Map pin: https://maps.google.com/?q={location[0]},{location[1]}"
     if not address_text:
         conversation.state = ConversationState.AWAITING_ADDRESS
         return {"error": "missing_address", "message": "Ask the customer for a delivery address."}
+
+    # Delivery contact. contact_phone MAY legitimately differ from the WhatsApp
+    # number (a landline, or someone else's mobile for the receiver), so we take
+    # what the model collected and only fall back to the messaging number. Name
+    # falls back to the customer's saved name, which may be blank.
+    resolved_contact_name = (contact_name or "").strip() or customer.name
+    resolved_contact_phone = (contact_phone or "").strip() or customer.whatsapp_number
+    # Opportunistically remember a name we didn't have before — costs nothing and
+    # means the next order can greet them by name.
+    if resolved_contact_name and not customer.name:
+        customer.name = resolved_contact_name
 
     # Prices come from the cart snapshot, never from the model's arguments.
     subtotal = sum(Decimal(line["price"]) * line["quantity"] for line in lines)
@@ -1234,6 +1279,10 @@ def place_order(
         customer_id=customer.id,
         restaurant_id=restaurant.id,
         delivery_address_text=address_text,
+        contact_name=resolved_contact_name,
+        contact_phone=resolved_contact_phone,
+        delivery_lat=location[0] if location is not None else None,
+        delivery_lng=location[1] if location is not None else None,
         status=initial_status,
         payment_method=method,
         subtotal=subtotal,
@@ -1303,6 +1352,8 @@ def place_order(
         "total": _money(total),
         "payment_method": method.value,
         "delivery_address": address_text,
+        "contact_name": resolved_contact_name,
+        "contact_phone": resolved_contact_phone,
         "status": order.status.value,
     }
     if applied_coupon is not None:

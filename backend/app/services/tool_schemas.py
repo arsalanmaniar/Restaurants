@@ -237,6 +237,23 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "Delivery address, if the customer gave one in this chat.",
                     },
+                    "contact_name": {
+                        "type": "string",
+                        "description": (
+                            "Name of the person receiving the delivery, if the "
+                            "customer gave one. Omit if not provided."
+                        ),
+                    },
+                    "contact_phone": {
+                        "type": "string",
+                        "description": (
+                            "Contact mobile number for the delivery, if the customer "
+                            "gave one. This CAN differ from their WhatsApp number "
+                            "(a landline, or someone else's number for the receiver). "
+                            "Omit if they didn't give a separate number — the WhatsApp "
+                            "number is used by default."
+                        ),
+                    },
                     "payment_method": {
                         "type": "string",
                         "enum": ["cod", "jazzcash", "easypaisa"],
