@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.models import PaymentMethod
+from app.models import OrderStatus, PaymentMethod
 from app.services import agent
 from app.services import billing
 from app.services import tools
@@ -499,3 +499,97 @@ class TestUnderstatedTotalGuard:
         assert "Rs. 1150\nConfirm" not in reply, "the customer must never confirm the bare subtotal"
         assert agent._quoted_total(reply) == Decimal("1422.50")
         assert any(t["tool"] == "preview_bill" for t in trace)
+
+
+class TestSwitchToOnlineAfterCodGuard:
+    """Bug 2: after a COD order is placed the customer asks to pay online, and the
+    model IGNORES it — no lie (so the fake-link guard stays silent), no answer. The
+    request must not vanish; the customer gets the committed-to-COD / place-a-new-
+    online-order reply deterministically."""
+
+    def test_detector_fires_on_an_ignored_post_cod_online_request(
+        self, db, cod_order, conversation,
+    ):
+        # cod_order is the customer's most recent order, COD + PENDING, cart empty.
+        assert agent._switch_to_online_after_cod(
+            db, conversation, "online payment kar sakta hoon?", trace=[]
+        ) is True
+
+    def test_detector_ignores_a_message_that_never_mentions_online(
+        self, db, cod_order, conversation,
+    ):
+        assert agent._switch_to_online_after_cod(
+            db, conversation, "mera order kahan hai?", trace=[]
+        ) is False
+
+    def test_detector_does_not_fire_while_a_new_order_is_being_built(
+        self, db, cod_order, conversation,
+    ):
+        """A non-empty cart means 'online' is a payment-method choice for the order
+        in progress, not a switch of the placed one."""
+        conversation.cart = {
+            "items": [{
+                "menu_item_id": 1, "restaurant_id": 1,
+                "name": "x", "price": "100.00", "quantity": 1, "notes": None,
+            }]
+        }
+        assert agent._switch_to_online_after_cod(
+            db, conversation, "online se pay karunga", trace=[]
+        ) is False
+
+    def test_detector_does_not_fire_when_this_turn_placed_an_order(
+        self, db, cod_order, conversation,
+    ):
+        """A correctly-built new online order this turn (with its own real link)
+        must pass through untouched, not be overridden by the guard."""
+        trace = [{
+            "tool": "place_order",
+            "args": "{}",
+            "result": {"order_number": "AB-NEW999", "payment_link": "https://pay.test/x"},
+        }]
+        assert agent._switch_to_online_after_cod(
+            db, conversation, "online payment", trace=trace
+        ) is False
+
+    def test_detector_does_not_fire_without_a_prior_order(
+        self, db, conversation,
+    ):
+        assert agent._switch_to_online_after_cod(
+            db, conversation, "online payment karni hai", trace=[]
+        ) is False
+
+    def test_detector_does_not_fire_when_latest_order_is_already_online(
+        self, db, cod_order, conversation,
+    ):
+        cod_order.payment_method = PaymentMethod.JAZZCASH
+        db.flush()
+        assert agent._switch_to_online_after_cod(
+            db, conversation, "online payment", trace=[]
+        ) is False
+
+    def test_detector_does_not_fire_when_the_cod_order_was_cancelled(
+        self, db, cod_order, conversation,
+    ):
+        cod_order.status = OrderStatus.CANCELLED
+        db.flush()
+        assert agent._switch_to_online_after_cod(
+            db, conversation, "online payment", trace=[]
+        ) is False
+
+    def test_ignored_switch_reply_is_replaced_end_to_end(
+        self, db, cod_order, conversation, scripted_model, monkeypatch,
+    ):
+        """Full path through handle_incoming_message: the model produces a reply that
+        ignores the online-payment request (no lie, no link) and the customer instead
+        receives the committed-to-COD offer to place a new online order."""
+        scripted_model(
+            [completion(message(content="Aapka order jald hi deliver ho jayega."))] * 4
+        )
+        sent = []
+        monkeypatch.setattr(agent, "send_text", lambda to, body: sent.append(body))
+
+        agent.handle_incoming_message(db, conversation, "online payment kar sakta hoon?")
+
+        assert len(sent) == 1
+        assert sent[0] == agent.FAKE_LINK_REPLACEMENT
+        assert "jald hi deliver" not in sent[0], "the ignoring reply must be suppressed"

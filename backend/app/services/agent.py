@@ -23,7 +23,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models import Conversation, MessageDirection, Order, Restaurant
+from app.models import (
+    Conversation,
+    MessageDirection,
+    Order,
+    OrderStatus,
+    PaymentMethod,
+    Restaurant,
+)
 from app.services import conversations as convo
 from app.services import prefilter
 from app.services import tools
@@ -107,6 +114,71 @@ def _claims_fake_link(reply: str, trace: list[dict]) -> bool:
         # There IS a URL — presumably the real place_order link. Not a fake.
         return False
     return not _has_real_payment_link(trace)
+
+
+# Ways a customer asks to pay online for an order already placed as COD. Simple
+# substrings, same style as FAKE_LINK_PATTERNS — the strong contextual gate in
+# _switch_to_online_after_cod (below) is what keeps false positives down.
+_ONLINE_SWITCH_PATTERNS = (
+    "online",
+    "jazzcash",
+    "jazz cash",
+    "easypaisa",
+    "easy paisa",
+    "card",
+)
+
+
+def _placed_an_order_this_turn(trace: list[dict]) -> bool:
+    """True if any place_order call in this turn's trace actually created an order
+    (returned an order_number). A duplicate_prevented / error result did not."""
+    for step in trace:
+        if step.get("tool") != "place_order":
+            continue
+        result = step.get("result") or {}
+        if isinstance(result, dict) and result.get("order_number"):
+            return True
+    return False
+
+
+def _switch_to_online_after_cod(
+    db: Session, conversation: Conversation, body: str | None, trace: list[dict]
+) -> bool:
+    """The customer is asking to pay online for an order already committed to
+    cash-on-delivery, and the model neither placed a fresh online order nor (the
+    lie the fake-link guard catches) claimed a link was sent — it simply ignored
+    the request. Deterministically steer them to place a new online order instead
+    of dropping it on the floor (Bug 2).
+
+    Fires only when ALL hold, to avoid hijacking a normal payment-method choice:
+      * the inbound asks to pay online / names an online gateway,
+      * the cart is EMPTY (a non-empty cart means a new order is being built, where
+        "online" is a method choice, not a switch),
+      * this turn placed no order (a correctly-built new online order, with its own
+        real link, must pass through untouched),
+      * the customer's most recent order is a live (non-cancelled) COD order.
+    """
+    if not body:
+        return False
+    lowered = body.lower()
+    if not any(pat in lowered for pat in _ONLINE_SWITCH_PATTERNS):
+        return False
+    if (conversation.cart or {}).get("items"):
+        return False
+    if _placed_an_order_this_turn(trace):
+        return False
+    last_order = db.scalar(
+        select(Order)
+        .where(Order.customer_id == conversation.customer_id)
+        .order_by(Order.id.desc())
+        .limit(1)
+    )
+    if last_order is None:
+        return False
+    return (
+        last_order.payment_method == PaymentMethod.COD
+        and last_order.status != OrderStatus.CANCELLED
+    )
 
 SYSTEM_PROMPT = """You are AbhiAya, a professional WhatsApp assistant that takes food \
 orders for a network of restaurants in Pakistan.
@@ -1151,6 +1223,18 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
             "conversation %s: suppressed fake payment-link claim in outbound reply: %r",
             conversation.id,
             reply[:200],
+        )
+        reply = FAKE_LINK_REPLACEMENT
+
+    # Bug 2 — post-COD switch IGNORED. The sibling failure to the fake link: the
+    # customer asks to pay online for an already-placed COD order and the model
+    # neither lies (caught above) nor answers — it just drops the request. Give
+    # the same deterministic, correct answer the lie path gets.
+    elif _switch_to_online_after_cod(db, conversation, body, trace):
+        logger.info(
+            "conversation %s: post-COD online-payment request went unanswered; "
+            "steering to a new online order",
+            conversation.id,
         )
         reply = FAKE_LINK_REPLACEMENT
 
