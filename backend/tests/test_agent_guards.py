@@ -593,3 +593,145 @@ class TestSwitchToOnlineAfterCodGuard:
         assert len(sent) == 1
         assert sent[0] == agent.FAKE_LINK_REPLACEMENT
         assert "jald hi deliver" not in sent[0], "the ignoring reply must be suppressed"
+
+
+class TestDiscoveryHonestyGuard:
+    """Bug 3: the model must not contradict a genuine zero-match by naming
+    restaurants anyway, nor present a description-only weak match as a confirmed
+    dish. Both are force-regenerated once; worst case is extra latency, never a
+    wrong message to the customer."""
+
+    ZERO_MATCH_TRACE = [{
+        "tool": "find_restaurants",
+        "args": '{"query": "burger"}',
+        "result": {"query": "burger", "restaurants": [], "found_anywhere": False},
+    }]
+
+    def _weak_trace(self, name):
+        return [{
+            "tool": "find_restaurants",
+            "args": '{"query": "spicy"}',
+            "result": {
+                "query": "spicy",
+                "restaurants": [{"id": 1, "name": name, "match_strength": "weak"}],
+                "weak_matches_only": True,
+            },
+        }]
+
+    # --- Part A: contradiction ------------------------------------------------
+
+    def test_contradiction_fires_when_zero_match_reply_names_a_restaurant(
+        self, db, conversation,
+    ):
+        reply = "Sorry, burger nahi hai.\n1. Karachi Biryani House\n2. Pizza Junction"
+        assert agent._discovery_contradiction(
+            db, conversation, reply, self.ZERO_MATCH_TRACE
+        ) is True
+
+    def test_contradiction_not_flagged_when_reply_offers_only_cuisines(
+        self, db, conversation,
+    ):
+        reply = (
+            "Burger available nahi hai. Humare paas Desi, Pizza aur Chinese hai — "
+            "kaunsi try karein?"
+        )
+        assert agent._discovery_contradiction(
+            db, conversation, reply, self.ZERO_MATCH_TRACE
+        ) is False
+
+    def test_contradiction_not_flagged_while_a_restaurant_is_active(
+        self, db, conversation, pizza,
+    ):
+        """With an active restaurant, 'Pizza Junction mein burger nahi hai' is the
+        correct answer, not a contradiction."""
+        conversation.active_restaurant_id = pizza.id
+        reply = "Pizza Junction mein burger nahi hai. Kuch aur try karein?"
+        assert agent._discovery_contradiction(
+            db, conversation, reply, self.ZERO_MATCH_TRACE
+        ) is False
+
+    def test_contradiction_not_flagged_without_a_zero_match(self, db, conversation):
+        reply = "1. Karachi Biryani House\n2. Pizza Junction"
+        trace = [{
+            "tool": "find_restaurants", "args": "{}",
+            "result": {"restaurants": [{"id": 1, "name": "Karachi Biryani House"}]},
+        }]
+        assert agent._discovery_contradiction(db, conversation, reply, trace) is False
+
+    # --- Part B: weak-match overclaim ----------------------------------------
+
+    def test_overclaim_fires_on_confident_weak_match_without_verification(
+        self, conversation,
+    ):
+        reply = "Haan, Karachi Biryani House mein spicy dish hai. Order karun?"
+        assert agent._discovery_overclaim(
+            conversation, reply, self._weak_trace("Karachi Biryani House")
+        ) is True
+
+    def test_overclaim_not_flagged_when_reply_hedges(self, conversation):
+        reply = "Karachi Biryani House mein ho sakta hai — menu dekh ke confirm karta hoon."
+        assert agent._discovery_overclaim(
+            conversation, reply, self._weak_trace("Karachi Biryani House")
+        ) is False
+
+    def test_overclaim_not_flagged_when_get_menu_was_called(self, conversation):
+        reply = "Karachi Biryani House mein spicy dish hai."
+        trace = self._weak_trace("Karachi Biryani House") + [{
+            "tool": "get_menu", "args": "{}",
+            "result": {"restaurant": {"id": 1, "name": "Karachi Biryani House"}},
+        }]
+        assert agent._discovery_overclaim(conversation, reply, trace) is False
+
+    def test_overclaim_not_flagged_when_reply_does_not_name_the_restaurant(
+        self, conversation,
+    ):
+        reply = "Aap kya order karna chahenge?"
+        assert agent._discovery_overclaim(
+            conversation, reply, self._weak_trace("Karachi Biryani House")
+        ) is False
+
+    def test_overclaim_not_flagged_on_a_strong_match(self, conversation):
+        reply = "Karachi Biryani House mein biryani hai."
+        trace = [{
+            "tool": "find_restaurants", "args": "{}",
+            "result": {"restaurants": [
+                {"id": 1, "name": "Karachi Biryani House", "match_strength": "strong"}
+            ]},
+        }]
+        assert agent._discovery_overclaim(conversation, reply, trace) is False
+
+    # --- End to end through generate_reply -----------------------------------
+
+    def test_contradiction_reply_is_regenerated(self, db, conversation, scripted_model):
+        """burger is a genuine zero-match; the model first lists restaurants anyway,
+        the guard regenerates, and the customer sees the cuisines-only answer."""
+        bad = "Burger nahi hai.\n1. Karachi Biryani House\n2. Pizza Junction"
+        good = (
+            "Burger available nahi hai. Humare paas Desi, Pizza aur Chinese hai — "
+            "kaunsi try karein?"
+        )
+        scripted_model([
+            completion(message(tool_calls=[tool_call("f", "find_restaurants", {"query": "burger"})])),
+            completion(message(content=bad)),
+            completion(message(content=good)),
+        ])
+
+        reply, trace = agent.generate_reply(db, conversation)
+
+        assert reply == good
+        assert any(t["tool"] == "find_restaurants" for t in trace)
+
+    def test_overclaim_reply_is_regenerated(self, db, conversation, scripted_model):
+        """spicy is a description-only (weak) match; the model first claims the dish
+        is there, the guard regenerates, and the customer gets a hedged answer."""
+        bad = "Haan, Karachi Biryani House mein spicy dish hai. Order karun?"
+        good = "Karachi Biryani House ho sakta hai — menu dekh ke confirm karta hoon."
+        scripted_model([
+            completion(message(tool_calls=[tool_call("f", "find_restaurants", {"query": "spicy"})])),
+            completion(message(content=bad)),
+            completion(message(content=good)),
+        ])
+
+        reply, _trace = agent.generate_reply(db, conversation)
+
+        assert reply == good

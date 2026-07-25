@@ -30,6 +30,7 @@ from app.models import (
     OrderStatus,
     PaymentMethod,
     Restaurant,
+    RestaurantStatus,
 )
 from app.services import conversations as convo
 from app.services import prefilter
@@ -891,6 +892,84 @@ def _understates_total(reply: str | None, conversation: Conversation) -> bool:
     return False
 
 
+# Bilingual uncertainty markers. Their PRESENCE means the model is hedging a weak
+# match ("I'll check", "shayad", "menu dekh ke") rather than promising it — exactly
+# what the weak-match note asks for — so we leave that reply alone.
+_HEDGE_MARKERS = (
+    "shayad",
+    "ho sakta",
+    "sure nahi",
+    "confirm",
+    "check kar",
+    "menu dekh",
+    "pata kar",
+    "possib",
+    "might",
+    "not sure",
+    "let me check",
+    "verify",
+)
+
+
+def _latest_find_restaurants_result(trace: list[dict]) -> dict | None:
+    """The most recent find_restaurants tool result this turn, or None."""
+    for step in reversed(trace):
+        if step.get("tool") == "find_restaurants":
+            result = step.get("result")
+            if isinstance(result, dict):
+                return result
+    return None
+
+
+def _tool_called_this_turn(trace: list[dict], name: str) -> bool:
+    return any(step.get("tool") == name for step in trace)
+
+
+def _active_restaurant_names(db: Session) -> list[str]:
+    return list(
+        db.scalars(
+            select(Restaurant.name).where(Restaurant.status == RestaurantStatus.ACTIVE)
+        ).all()
+    )
+
+
+def _discovery_contradiction(
+    db: Session, conversation: Conversation, reply: str | None, trace: list[dict]
+) -> bool:
+    """Bug 3, Part A: a genuine zero-match discovery turn whose reply nonetheless
+    names a real restaurant — 'we have no burgers' followed by a restaurant list,
+    the exact self-contradiction from the burger trace. Scoped to pure discovery:
+    with an active restaurant, naming it ('Pizza Junction mein burger nahi hai') is
+    the correct answer, not a contradiction."""
+    if not reply or conversation.active_restaurant_id is not None:
+        return False
+    result = _latest_find_restaurants_result(trace)
+    if not result or result.get("found_anywhere") is not False:
+        return False
+    lowered = reply.lower()
+    return any(name.lower() in lowered for name in _active_restaurant_names(db))
+
+
+def _discovery_overclaim(
+    conversation: Conversation, reply: str | None, trace: list[dict]
+) -> bool:
+    """Bug 3, Part B: a description-only (weak) match presented as a confirmed dish.
+    The weak-match note tells the model to offer it as a possibility and get_menu to
+    check; the overclaim names the restaurant with no hedge and no verification."""
+    if not reply:
+        return False
+    result = _latest_find_restaurants_result(trace)
+    if not result or not result.get("weak_matches_only"):
+        return False
+    if _tool_called_this_turn(trace, "get_menu"):
+        return False
+    lowered = reply.lower()
+    if any(marker in lowered for marker in _HEDGE_MARKERS):
+        return False
+    names = [r.get("name", "") for r in result.get("restaurants", [])]
+    return any(name and name.lower() in lowered for name in names)
+
+
 def _leaks_tool_call(text: str | None) -> bool:
     """True if the model printed its tool call as prose instead of calling it.
 
@@ -960,6 +1039,7 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
 
     forced_once = False
     total_corrected_once = False
+    discovery_corrected_once = False
 
     # Loop detection for read-only tools: the model has been observed calling the
     # same read-only tool 3-5 times in one turn (e.g. list_restaurants returning a
@@ -1061,6 +1141,39 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                             "preview_bill with the customer's payment method now and "
                             "read back its EXACT figures (subtotal, tax, delivery, "
                             "total). Do not compute any amount yourself."
+                        ),
+                    }
+                )
+                continue
+
+            # Bug 3 — discovery dishonesty. Either the model contradicted a genuine
+            # zero-match by naming restaurants anyway ("no burgers" + a restaurant
+            # list), or it presented a description-only weak match as a confirmed
+            # dish. Neither is safe to send; nudge once and let it regenerate. We do
+            # NOT force a tool — the honest answer is usually text (offer cuisines /
+            # offer as a possibility), and get_menu (for the weak case) stays a free
+            # choice under tool_choice=auto.
+            if not discovery_corrected_once and (
+                _discovery_contradiction(db, conversation, text, trace)
+                or _discovery_overclaim(conversation, text, trace)
+            ):
+                discovery_corrected_once = True
+                logger.info(
+                    "conversation %s produced a dishonest discovery reply (%r); regenerating",
+                    conversation.id,
+                    text[:80],
+                )
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Your draft reply misrepresents the search result. If the "
+                            "search found the dish NOWHERE, say plainly and first that "
+                            "it is not available and offer the available CUISINES — do "
+                            "NOT list or name any restaurant. If the match was "
+                            "description-only (weak / unconfirmed), do NOT claim the "
+                            "restaurant serves it — offer it as a possibility and call "
+                            "get_menu to check first. Rewrite the reply accordingly."
                         ),
                     }
                 )
