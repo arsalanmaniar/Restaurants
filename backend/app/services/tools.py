@@ -1171,6 +1171,36 @@ def _has_any_outbound(db: Session, conversation: Conversation) -> bool:
     )
 
 
+def _bill_fingerprint(
+    lines: list[dict], method: PaymentMethod, coupon_code: str | None
+) -> str:
+    """A stable key for everything that determines the customer-facing total:
+    the exact cart lines, the payment method (which sets the tax rate), and any
+    coupon. preview_bill stamps this; place_order compares against it so an order
+    can only commit for a bill the customer was actually shown."""
+    items = sorted(
+        (int(line["menu_item_id"]), int(line["quantity"]), (line.get("notes") or ""))
+        for line in lines
+    )
+    coupon = (coupon_code or "").strip().upper()
+    return f"{method.value}|{coupon}|{items!r}"
+
+
+def _bill_was_previewed(
+    conversation: Conversation,
+    lines: list[dict],
+    method: PaymentMethod,
+    coupon_code: str | None,
+) -> bool:
+    """Whether preview_bill has produced the exact taxed bill for THIS cart +
+    method + coupon in this conversation — i.e. the customer could have been
+    shown the real total before confirming. See the Bug 1 guard in place_order."""
+    previewed = (conversation.context or {}).get("previewed_bill")
+    if not isinstance(previewed, dict):
+        return False
+    return previewed.get("fingerprint") == _bill_fingerprint(lines, method, coupon_code)
+
+
 def preview_bill(
     db: Session,
     conversation: Conversation,
@@ -1178,7 +1208,9 @@ def preview_bill(
     coupon_code: str | None = None,
 ) -> dict:
     """The exact bill place_order will produce for the current cart and payment
-    method — READ ONLY, nothing is placed or mutated.
+    method. Places nothing and does not touch the cart; it does record a small
+    marker in conversation.context (`previewed_bill`) so place_order can verify
+    the customer was shown this exact taxed total before it commits the order.
 
     The tax rate depends on the payment method (cash is taxed higher than
     online), so the customer's total is not known until they have chosen how to
@@ -1224,6 +1256,17 @@ def preview_bill(
         discount=discount_amount,
         method=method,
     )
+
+    # Record that the customer has now been shown the exact taxed total for this
+    # cart + method + coupon. place_order refuses to commit an order whose bill
+    # was never previewed, which is what stops the read-back-omits-tax bait-and-
+    # switch. Reassigned (not mutated) so JSONB change tracking fires.
+    context = dict(conversation.context or {})
+    context["previewed_bill"] = {
+        "fingerprint": _bill_fingerprint(lines, method, coupon_code),
+        "total": _money(bill.total),
+    }
+    conversation.context = context
 
     result = {
         "restaurant": restaurant.name,
@@ -1450,6 +1493,28 @@ def place_order(
         applied_coupon = application.coupon
         discount_amount = application.discount_amount
 
+    # Bug 1 — the bait-and-switch guard. An order must not commit unless the
+    # customer was shown the EXACT taxed bill for this cart + method + coupon via
+    # preview_bill. Without it the model could read the pre-tax food subtotal back
+    # as the "total", get a yes, then place an order that charges subtotal + tax +
+    # delivery — more than the customer agreed to pay. Gated on _has_any_outbound
+    # so direct-tool callers (tests / seeds that never drive a read-back) are
+    # unaffected — the same escape hatch the payment-method guard above uses.
+    if _has_any_outbound(db, conversation) and not _bill_was_previewed(
+        conversation, lines, method, coupon_code
+    ):
+        return {
+            "error": "preview_first",
+            "message": (
+                "Before placing this order you must show the customer the exact "
+                "bill. Call preview_bill with this payment_method (and coupon_code "
+                "if any), read the FULL breakdown back — subtotal, tax, delivery, "
+                "total — get an explicit yes, then call place_order again with the "
+                "same arguments. Never read the food subtotal back as the total; it "
+                "excludes tax and delivery."
+            ),
+        }
+
     # The bill — subtotal, tax (rate from the payment method), delivery, total —
     # is computed in ONE place shared with preview_bill, so the total the customer
     # confirmed in the read-back is exactly the total we store and charge.
@@ -1547,6 +1612,9 @@ def place_order(
 
     context = dict(conversation.context or {})
     context["last_order_number"] = order.order_number
+    # This bill is spent — drop the preview marker so it can't authorise a second,
+    # unread-back order for an identically-rebuilt cart.
+    context.pop("previewed_bill", None)
     conversation.context = context
 
     result = {

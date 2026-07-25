@@ -15,6 +15,7 @@ durable until that commit.
 
 import json
 import logging
+import re
 from decimal import Decimal
 
 from groq import BadRequestError, Groq, GroqError
@@ -283,7 +284,11 @@ just cod), use it silently — do not ask.
 customer gave one) to get the exact numbers. NEVER compute subtotal, tax, \
 delivery or total yourself — always take them from preview_bill.
   3. Read the full order back using those numbers: each item with quantity and \
-price, then Subtotal, Tax, Delivery, Total, and the delivery address.
+price, then Subtotal, Tax, Delivery, Total, and the delivery address. The Total \
+you read back is ALWAYS larger than the food subtotal — it ADDS tax and delivery. \
+Never present the subtotal as the Total, and never state a Total you did not get \
+from preview_bill. Quoting the pre-tax subtotal as the total is a bait-and-switch: \
+the customer confirms one number and is charged a higher one.
   4. Get an explicit "yes"/"haan".
   5. Call place_order with the SAME payment_method (and coupon_code). Coupons \
 pass through as coupon_code; never compute discounts yourself.
@@ -502,7 +507,14 @@ def _cart_summary(conversation: Conversation) -> str:
         note = f" ({line['notes']})" if line.get("notes") else ""
         parts.append(f"- {line['quantity']}x {line['name']}{note} = Rs. {line_total:.2f}")
 
-    return "Current cart:\n" + "\n".join(parts) + f"\nSubtotal: Rs. {total:.2f}"
+    return (
+        "Current cart:\n"
+        + "\n".join(parts)
+        + f"\nFood subtotal (pre-tax): Rs. {total:.2f}. This is the food cost ONLY — "
+        "it is NOT what the customer pays and must NEVER be read back as the "
+        '"Total". The amount payable is subtotal + tax + delivery; get every '
+        "figure from preview_bill before any read-back."
+    )
 
 
 def _recent_orders_summary(db: Session, conversation: Conversation) -> str:
@@ -752,6 +764,61 @@ def _is_stall(text: str | None) -> bool:
     return any(phrase in lowered for phrase in STALL_PATTERNS)
 
 
+# "Total: Rs. 1600" / "Kul: Rs. 1,600.00" — the figure the model presents as the
+# order total in a read-back, in either language. The leading \b is load-bearing:
+# without it "total" matches inside "Sub-total", so a correct read-back listing
+# "Subtotal: Rs. 1150 … Total: Rs. 1422.50" would bind the SUBTOTAL and be flagged
+# as understated. Non-greedy gap so it binds the Rs amount right after "total".
+_TOTAL_QUOTE_RE = re.compile(
+    r"\b(?:total|kul)\b[^0-9]{0,20}rs\.?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+    re.IGNORECASE,
+)
+
+
+def _quoted_total(text: str | None) -> Decimal | None:
+    """The Rs figure the reply presents as the order Total, or None if it isn't
+    quoting one."""
+    if not text:
+        return None
+    match = _TOTAL_QUOTE_RE.search(text)
+    if not match:
+        return None
+    try:
+        return Decimal(match.group(1).replace(",", ""))
+    except (ArithmeticError, ValueError):
+        return None
+
+
+def _understates_total(reply: str | None, conversation: Conversation) -> bool:
+    """True when a read-back quotes a Total that has dropped tax and/or delivery.
+
+    The bait-and-switch (Bug 1): the model reads the pre-tax food subtotal back as
+    the "Total", the customer says haan, and the order then charges subtotal + tax
+    + delivery — more than they agreed to. A genuine total is ALWAYS greater than
+    the food subtotal (tax > 0, delivery >= 0), so a quoted total at or below the
+    subtotal proves tax/delivery were dropped. When a preview_bill total is on
+    record for the current cart, a quote materially below THAT is caught too (e.g.
+    subtotal + delivery quoted, but tax omitted)."""
+    quoted = _quoted_total(reply)
+    if quoted is None:
+        return False
+    lines = (conversation.cart or {}).get("items", [])
+    if not lines:
+        return False
+    subtotal = sum(Decimal(line["price"]) * line["quantity"] for line in lines)
+    if quoted <= subtotal:
+        return True
+    previewed = (conversation.context or {}).get("previewed_bill")
+    if isinstance(previewed, dict):
+        try:
+            reference = Decimal(str(previewed.get("total")))
+        except (ArithmeticError, ValueError, TypeError):
+            reference = None
+        if reference is not None and quoted < reference - Decimal("0.50"):
+            return True
+    return False
+
+
 def _leaks_tool_call(text: str | None) -> bool:
     """True if the model printed its tool call as prose instead of calling it.
 
@@ -820,6 +887,7 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
     malformed_retries = 0
 
     forced_once = False
+    total_corrected_once = False
 
     # Loop detection for read-only tools: the model has been observed calling the
     # same read-only tool 3-5 times in one turn (e.g. list_restaurants returning a
@@ -892,6 +960,35 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                             "You just told the customer you would check something but called "
                             "no tool, so nothing happened. Do not narrate. Call the tool you "
                             "need right now."
+                        ),
+                    }
+                )
+                continue
+
+            # Bug 1 — understated read-back. The model quoted a Total that dropped
+            # tax and/or delivery (it is at or below the pre-tax food subtotal).
+            # That number must never reach the customer, so suppress this reply and
+            # force preview_bill; the next round produces a correct read-back. Fires
+            # once — if the real, discounted total is genuinely low, the regenerated
+            # reply is sent as-is rather than looping.
+            if _understates_total(text, conversation) and not total_corrected_once:
+                total_corrected_once = True
+                force_next = True
+                logger.info(
+                    "conversation %s read back an understated total (%r); forcing preview_bill",
+                    conversation.id,
+                    text[:80],
+                )
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "The total you just read back is lower than the food "
+                            "subtotal, so it is missing tax and/or delivery — the "
+                            "customer must never be quoted that number. Call "
+                            "preview_bill with the customer's payment method now and "
+                            "read back its EXACT figures (subtotal, tax, delivery, "
+                            "total). Do not compute any amount yourself."
                         ),
                     }
                 )

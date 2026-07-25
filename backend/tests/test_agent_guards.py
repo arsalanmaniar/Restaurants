@@ -7,11 +7,21 @@ actually produced during development.
 
 import json
 import types
+from decimal import Decimal
 
 import pytest
 
+from app.models import PaymentMethod
 from app.services import agent
+from app.services import billing
 from app.services import tools
+
+
+def _subtotal(conversation):
+    return sum(
+        Decimal(line["price"]) * line["quantity"]
+        for line in conversation.cart["items"]
+    )
 
 
 def message(tool_calls=None, content=None):
@@ -352,3 +362,140 @@ class TestLoopDetection:
 
         reply, trace = agent.generate_reply(db, conversation)
         assert reply == "Added."
+
+
+class TestUnderstatedTotalGuard:
+    """Bug 1, reply layer: the model reads back the pre-tax food subtotal as the
+    "Total", the customer would confirm it, and the order then charges subtotal +
+    tax + delivery. The understated number must never reach the customer."""
+
+    def test_detector_flags_subtotal_quoted_as_total(self, db, cart_with_pizza):
+        subtotal = _subtotal(cart_with_pizza)
+        readback = (
+            "Aapka order:\n2x Chicken Tikka Pizza\n"
+            f"Total: Rs. {subtotal:.0f}\nConfirm karein?"
+        )
+        assert agent._understates_total(readback, cart_with_pizza) is True
+
+    def test_detector_passes_a_correct_taxed_total(self, db, cart_with_pizza):
+        subtotal = _subtotal(cart_with_pizza)
+        # Any total above the food subtotal is plausible (tax + delivery added).
+        readback = f"Total: Rs. {subtotal + Decimal('500'):.0f}. Confirm karein?"
+        assert agent._understates_total(readback, cart_with_pizza) is False
+
+    def test_detector_ignores_replies_that_quote_no_total(self, db, cart_with_pizza):
+        assert agent._understates_total("Aap ka naam kya hai?", cart_with_pizza) is False
+
+    def test_quoted_total_binds_the_total_line_not_the_subtotal_line(self):
+        """A correct read-back lists both Subtotal and Total. The parser must bind
+        the Total, never the (lower) Subtotal — 'total' hides inside 'Sub-total', so
+        without a leading word boundary every proper read-back would be mis-read as
+        understated."""
+        readback = (
+            "Subtotal: Rs. 1150\nTax: Rs. 172.50\nDelivery: Rs. 100.00\n"
+            "Total: Rs. 1422.50\nConfirm karein?"
+        )
+        assert agent._quoted_total(readback) == Decimal("1422.50")
+
+    def test_detector_flags_a_quote_below_the_previewed_total(
+        self, db, conversation, pizza, menu_item,
+    ):
+        """Subtotal + delivery but tax dropped: above the subtotal, so the subtotal
+        check misses it — but a preview_bill is on record, and the quote is below
+        that real total. Caught."""
+        tools.get_menu(db, conversation, restaurant_id=pizza.id)
+        tools.add_to_cart(db, conversation, menu_item_id=menu_item.id, quantity=2)
+        db.flush()
+        preview = tools.preview_bill(db, conversation, payment_method="cod")
+
+        # Quote the (subtotal + delivery) figure — real total minus the tax.
+        understated = Decimal(preview["subtotal"]) + Decimal(preview["delivery_fee"])
+        assert understated < Decimal(preview["total"])  # sanity: tax really was dropped
+        readback = f"Total: Rs. {understated:.0f}. Confirm karein?"
+        assert agent._understates_total(readback, conversation) is True
+
+    def test_understated_readback_is_suppressed_and_forces_preview(
+        self, db, conversation, pizza, menu_item, scripted_model,
+    ):
+        """End to end through the tool loop: round 1 the model reads back the bare
+        subtotal as the Total; the guard suppresses it and forces preview_bill;
+        round 3 it produces a correct read-back. The customer only ever sees the
+        corrected reply, and preview_bill really was called."""
+        tools.get_menu(db, conversation, restaurant_id=pizza.id)
+        tools.add_to_cart(db, conversation, menu_item_id=menu_item.id, quantity=2)
+        db.flush()
+        subtotal = _subtotal(conversation)
+
+        understated = (
+            f"Aapka order:\n2x Chicken Tikka Pizza\nTotal: Rs. {subtotal:.0f}\n"
+            "Confirm karein?"
+        )
+        corrected = "Aapka order taiyar hai. Total: Rs. 9999. Confirm karein?"
+        scripted_model(
+            [
+                completion(message(content=understated)),
+                completion(
+                    message(tool_calls=[tool_call("p", "preview_bill", {"payment_method": "cod"})])
+                ),
+                completion(message(content=corrected)),
+            ]
+        )
+
+        reply, trace = agent.generate_reply(db, conversation)
+
+        assert reply == corrected, "the understated read-back must not be what's sent"
+        assert agent._quoted_total(reply) > subtotal
+        assert any(t["tool"] == "preview_bill" for t in trace), (
+            "the guard must have forced a preview_bill call"
+        )
+
+    def test_replays_the_rs_1150_transcript_subtotal_shown_as_total(
+        self, db, conversation, pizza, menu_item, scripted_model,
+    ):
+        """The real WhatsApp transcript, verbatim. One Chicken Tikka Pizza (Rs. 1150).
+        The model read back "Total: Rs. 1150" — the bare food subtotal, tax and
+        delivery dropped. The true COD bill is 1150 + 15% tax (172.50) + 100 delivery
+        = Rs. 1422.50. The guard must catch the Rs. 1150 read-back, force preview_bill,
+        and the customer must only ever see the Rs. 1422.50 total."""
+        tools.get_menu(db, conversation, restaurant_id=pizza.id)
+        tools.add_to_cart(db, conversation, menu_item_id=menu_item.id, quantity=1)
+        db.flush()
+
+        subtotal = _subtotal(conversation)
+        assert subtotal == Decimal("1150.00"), "pins the transcript: one pizza = Rs. 1150"
+
+        # The real, correct bill the corrected read-back should carry.
+        bill = billing.compute_bill(
+            subtotal=Decimal("1150.00"),
+            delivery_fee=pizza.delivery_fee,
+            discount=Decimal("0.00"),
+            method=PaymentMethod.COD,
+        )
+        assert bill.total == Decimal("1422.50")
+
+        understated = "Aapka order:\n1x Chicken Tikka Pizza\nTotal: Rs. 1150\nConfirm karein?"
+        corrected = (
+            "Aapka order:\n1x Chicken Tikka Pizza\n"
+            f"Subtotal: Rs. 1150\nTax: Rs. {bill.tax_amount}\n"
+            f"Delivery: Rs. {bill.delivery_fee}\nTotal: Rs. {bill.total}\nConfirm karein?"
+        )
+
+        # Sanity: the detector really does flag the transcript's Rs. 1150 read-back.
+        assert agent._understates_total(understated, conversation) is True
+
+        scripted_model(
+            [
+                completion(message(content=understated)),
+                completion(
+                    message(tool_calls=[tool_call("p", "preview_bill", {"payment_method": "cod"})])
+                ),
+                completion(message(content=corrected)),
+            ]
+        )
+
+        reply, trace = agent.generate_reply(db, conversation)
+
+        assert reply == corrected
+        assert "Rs. 1150\nConfirm" not in reply, "the customer must never confirm the bare subtotal"
+        assert agent._quoted_total(reply) == Decimal("1422.50")
+        assert any(t["tool"] == "preview_bill" for t in trace)

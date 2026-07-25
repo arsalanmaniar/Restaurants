@@ -318,6 +318,8 @@ class TestFindRestaurantsBudgetEdgeCases:
         item = next(i for i in menu["items"] if i["name"] == "Chicken Biryani")
         add = tools.add_to_cart(db, conv, menu_item_id=item["id"], quantity=2)
         assert "error" not in add
+        # Real flow previews the taxed bill before placing (Bug 1 guard).
+        tools.preview_bill(db, conv, payment_method="cod")
         placed = tools.place_order(db, conv, payment_method="cod")
         assert "error" not in placed
         assert placed["order_number"].startswith("AB-")

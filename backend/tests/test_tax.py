@@ -17,9 +17,22 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select
 
-from app.models import Order, PaymentAttemptStatus, PaymentMethod
+from app.models import MessageDirection, Order, PaymentAttemptStatus, PaymentMethod
 from app.services import billing
+from app.services import conversations as convo_svc
 from app.services import tools
+
+
+def _seed_outbound(db, conversation):
+    """Log an outbound so the conversation looks like a real, model-driven flow.
+    The Bug 1 preview guard (like the silent-COD guard) only fires once the model
+    has actually been talking — direct-tool/seed callers with no outbound skip it.
+    """
+    convo_svc.log_message(
+        db, conversation, MessageDirection.OUTBOUND,
+        "Payment kis se karna hai — cod, jazzcash, ya easypaisa?",
+    )
+    db.flush()
 
 
 # --------------------------------------------------------------------------- #
@@ -215,3 +228,102 @@ class TestPreviewBill:
         preview = tools.preview_bill(db, conversation, payment_method="cod")
         assert "error" not in preview
         assert preview["below_minimum"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Bug 1 — the bait-and-switch guard: no order commits unless the customer was
+# shown the exact taxed bill for THIS cart + method + coupon via preview_bill.
+# --------------------------------------------------------------------------- #
+
+
+class TestPreviewGuard:
+
+    def _cart(self, db, conversation, pizza, menu_item, qty=2):
+        tools.get_menu(db, conversation, restaurant_id=pizza.id)
+        tools.add_to_cart(db, conversation, menu_item_id=menu_item.id, quantity=qty)
+        db.flush()
+
+    def test_real_flow_without_a_preview_is_refused_and_places_nothing(
+        self, db, conversation, pizza, menu_item,
+    ):
+        """The core bug: in a live conversation the model tries to place the order
+        without ever having shown the taxed bill. Refused, and no Order is created."""
+        self._cart(db, conversation, pizza, menu_item)
+        _seed_outbound(db, conversation)
+
+        result = tools.place_order(
+            db, conversation, delivery_address="House 1", payment_method="cod"
+        )
+
+        assert result.get("error") == "preview_first"
+        assert db.scalar(
+            select(Order).where(Order.customer_id == conversation.customer_id)
+        ) is None
+        assert conversation.cart["items"], "cart must be untouched so the model can retry"
+
+    def test_place_succeeds_after_a_matching_preview(
+        self, db, conversation, pizza, menu_item,
+    ):
+        self._cart(db, conversation, pizza, menu_item)
+        _seed_outbound(db, conversation)
+
+        tools.preview_bill(db, conversation, payment_method="cod")
+        result = tools.place_order(
+            db, conversation, delivery_address="House 1", payment_method="cod"
+        )
+
+        assert "order_number" in result, result
+
+    def test_preview_for_one_method_does_not_authorise_another(
+        self, db, conversation, pizza, menu_item,
+    ):
+        """The bait-and-switch by payment method: a preview shown for COD (15% tax)
+        must NOT wave through a placement as jazzcash (8% tax) — that is a different
+        total the customer never saw. The mismatch forces a fresh preview."""
+        self._cart(db, conversation, pizza, menu_item)
+        _seed_outbound(db, conversation)
+
+        tools.preview_bill(db, conversation, payment_method="cod")
+        result = tools.place_order(
+            db, conversation, delivery_address="House 1", payment_method="jazzcash"
+        )
+
+        assert result.get("error") == "preview_first"
+
+    def test_changing_the_cart_after_preview_forces_a_new_preview(
+        self, db, conversation, pizza, menu_item,
+    ):
+        self._cart(db, conversation, pizza, menu_item)
+        _seed_outbound(db, conversation)
+        tools.preview_bill(db, conversation, payment_method="cod")
+
+        # Customer adds another pizza — the previewed total is now stale.
+        tools.add_to_cart(db, conversation, menu_item_id=menu_item.id, quantity=1)
+        result = tools.place_order(
+            db, conversation, delivery_address="House 1", payment_method="cod"
+        )
+
+        assert result.get("error") == "preview_first"
+
+    def test_successful_placement_clears_the_preview_marker(
+        self, db, conversation, pizza, menu_item,
+    ):
+        self._cart(db, conversation, pizza, menu_item)
+        _seed_outbound(db, conversation)
+        tools.preview_bill(db, conversation, payment_method="cod")
+        tools.place_order(
+            db, conversation, delivery_address="House 1", payment_method="cod"
+        )
+
+        assert "previewed_bill" not in (conversation.context or {})
+
+    def test_direct_tool_call_without_an_outbound_still_places(
+        self, db, cart_with_pizza,
+    ):
+        """Non-regression: a direct-tool / seed caller (no outbound, never drives a
+        read-back) is unaffected — place_order still works without a preview, the
+        same escape hatch the silent-COD guard uses."""
+        result = tools.place_order(
+            db, cart_with_pizza, delivery_address="House 1", payment_method="cod"
+        )
+        assert "order_number" in result, result

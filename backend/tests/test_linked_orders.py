@@ -46,6 +46,20 @@ def _seed_payment_ack(db, conversation):
     db.flush()
 
 
+def _preview_then_place(db, conversation, **kwargs):
+    """A live conversation always previews the exact taxed bill and reads it back
+    before placing — and Bug 1's place_order guard now REQUIRES that preview for
+    any conversation that has an outbound (these tests seed one). Mirror the real
+    flow: preview this cart with the same method/coupon, then place."""
+    tools.preview_bill(
+        db,
+        conversation,
+        payment_method=kwargs.get("payment_method", "cod"),
+        coupon_code=kwargs.get("coupon_code"),
+    )
+    return tools.place_order(db, conversation, **kwargs)
+
+
 def _address_for(db, customer, text="House 1, DHA Lahore"):
     db.add(CustomerAddress(
         customer_id=customer.id,
@@ -71,7 +85,7 @@ def _place_first_order_at(
     )
     tools.add_to_cart(db, conversation, menu_item_id=item.id, quantity=2)
     db.flush()
-    result = tools.place_order(db, conversation, payment_method="cod")
+    result = _preview_then_place(db, conversation, payment_method="cod")
     assert "error" not in result, result
     return db.scalar(select(Order).where(Order.order_number == result["order_number"]))
 
@@ -105,7 +119,7 @@ class TestLinking:
             )
         )
         tools.add_to_cart(db, conversation, menu_item_id=pizza_item.id, quantity=1)
-        result_b = tools.place_order(
+        result_b = _preview_then_place(
             db, conversation,
             payment_method="cod",
             link_to_order_number=order_a.order_number,
@@ -143,7 +157,7 @@ class TestLinking:
             MenuItem.name.ilike("%Chicken Tikka Pizza%"),
         ))
         tools.add_to_cart(db, conversation, menu_item_id=item_b.id, quantity=1)
-        r_b = tools.place_order(
+        r_b = _preview_then_place(
             db, conversation, payment_method="cod",
             link_to_order_number=order_a.order_number,
         )
@@ -157,7 +171,7 @@ class TestLinking:
             MenuItem.name == "Beef Biryani",  # different from A's Chicken Biryani
         ))
         tools.add_to_cart(db, conversation, menu_item_id=item_c.id, quantity=1)
-        r_c = tools.place_order(
+        r_c = _preview_then_place(
             db, conversation, payment_method="cod",
             link_to_order_number=order_a.order_number,
         )
@@ -188,7 +202,7 @@ class TestLinking:
             MenuItem.name.ilike("%Chicken Tikka Pizza%"),
         ))
         tools.add_to_cart(db, conv2, menu_item_id=item.id, quantity=1)
-        result = tools.place_order(
+        result = _preview_then_place(
             db, conv2, payment_method="cod",
             link_to_order_number=order_a.order_number,  # A belongs to customer 1!
         )
@@ -209,7 +223,7 @@ class TestLinking:
         ))
         tools.add_to_cart(db, conversation, menu_item_id=item.id, quantity=1)
 
-        result = tools.place_order(
+        result = _preview_then_place(
             db, conversation, payment_method="cod",
             link_to_order_number="AB-NOPE99",
         )
@@ -232,7 +246,7 @@ class TestLinking:
             MenuItem.name.ilike("%Chicken Tikka Pizza%"),
         ))
         tools.add_to_cart(db, conversation, menu_item_id=item.id, quantity=1)
-        result = tools.place_order(
+        result = _preview_then_place(
             db, conversation, payment_method="cod",
             link_to_order_number=f"  {order_a.order_number.lower()}  ",
         )
@@ -317,7 +331,7 @@ class TestIndependenceAndEdges:
             MenuItem.name == "Beef Biryani",
         ))
         tools.add_to_cart(db, conversation, menu_item_id=beef.id, quantity=1)
-        result_b = tools.place_order(
+        result_b = _preview_then_place(
             db, conversation, payment_method="cod",
             link_to_order_number=order_a.order_number,
         )
@@ -345,7 +359,7 @@ class TestIndependenceAndEdges:
             MenuItem.name.ilike("%Chicken Tikka Pizza%"),
         ))
         tools.add_to_cart(db, conversation, menu_item_id=pizza_item.id, quantity=1)
-        tools.place_order(
+        _preview_then_place(
             db, conversation, payment_method="cod",
             link_to_order_number=order_a.order_number,
         )
@@ -387,7 +401,7 @@ class TestApiExposure:
             MenuItem.name.ilike("%Chicken Tikka Pizza%"),
         ))
         tools.add_to_cart(db, conversation, menu_item_id=pizza_item.id, quantity=1)
-        tools.place_order(
+        _preview_then_place(
             db, conversation, payment_method="cod",
             link_to_order_number=order_a.order_number,
         )
@@ -420,7 +434,7 @@ class TestApiExposure:
             MenuItem.name.ilike("%Chicken Tikka Pizza%"),
         ))
         tools.add_to_cart(db, conversation, menu_item_id=pizza_item.id, quantity=1)
-        r_b = tools.place_order(
+        r_b = _preview_then_place(
             db, conversation, payment_method="cod",
             link_to_order_number=order_a.order_number,
         )

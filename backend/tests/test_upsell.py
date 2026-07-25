@@ -372,6 +372,8 @@ class TestSuggestAddonsTool:
         )
         db.flush()
 
+        # Real flow previews the taxed bill before placing (Bug 1 guard).
+        tools.preview_bill(db, cart_with_pizza, payment_method="cod")
         result = tools.place_order(db, cart_with_pizza, payment_method="cod")
         # Whatever the outcome (order placed / silent-cod refused), it must
         # NOT be a NameError propagated back from _has_any_outbound.
