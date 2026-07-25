@@ -20,8 +20,12 @@ PROVIDER_FOR_METHOD = {
 
 def get_provider(name: PaymentProviderName) -> PaymentProvider:
     # A fake gateway reachable in production means anyone can mark an order paid.
-    # This check is the only thing preventing that, so it is not negotiable.
-    if name == PaymentProviderName.FAKE and not settings.debug:
+    # Allowed in DEBUG, or on a deployment that has DELIBERATELY opted into demo
+    # payments (demo_payments_enabled) — a demo has no real money and no real
+    # fulfilment. Both default off in a real production deployment.
+    if name == PaymentProviderName.FAKE and not (
+        settings.debug or settings.demo_payments_enabled
+    ):
         raise ProviderNotConfigured("The fake payment provider is not available in production")
 
     builder = _BUILDERS.get(name)
@@ -41,21 +45,26 @@ def is_configured(name: PaymentProviderName) -> bool:
 
 
 def _fake_stand_in_available() -> bool:
-    """Whether the FAKE provider is usable — i.e. we're in DEBUG mode. When true,
-    we can offer JazzCash / EasyPaisa as options for demo/testing even without
-    real merchant credentials (the callback still runs through FakeProvider's
-    signed pipeline — every guard on the money path is exercised for real)."""
-    return settings.debug and is_configured(PaymentProviderName.FAKE)
+    """Whether the FAKE provider is usable — in DEBUG, or on a deployment that has
+    explicitly opted into demo payments (demo_payments_enabled). When true, the
+    generic online option (and, in DEBUG, the named gateways) can be offered without
+    real merchant credentials — the callback still runs through FakeProvider's signed
+    pipeline, so every guard on the money path is exercised for real."""
+    return (settings.debug or settings.demo_payments_enabled) and is_configured(
+        PaymentProviderName.FAKE
+    )
 
 
 def provider_for_method(method: PaymentMethod) -> PaymentProviderName:
     """The provider that will actually settle this method's payments.
 
-    Real provider if its credentials are set. Otherwise, in DEBUG mode, fall
-    back to the FAKE provider so the flow can be demoed end-to-end without
-    real merchant onboarding. In production (DEBUG=false) an unconfigured
-    method raises ProviderNotConfigured — matching what `available_methods()`
-    would have hidden from the AI in the first place.
+    Real provider if its credentials are set. Otherwise, when the fake stand-in
+    is available (DEBUG, or a demo deployment with demo_payments_enabled), fall
+    back to the FAKE provider so the flow can be demoed end-to-end without real
+    merchant onboarding — this is what settles the generic `online` method. In a
+    real production deployment (neither flag set) an unconfigured method raises
+    ProviderNotConfigured — matching what `available_methods()` would have hidden
+    from the AI in the first place.
 
     COD is not a gateway-backed method (money changes hands at delivery, not
     through a payment adapter). place_order returns before calling this for
@@ -74,12 +83,29 @@ def provider_for_method(method: PaymentMethod) -> PaymentProviderName:
 
 
 def available_methods() -> list[PaymentMethod]:
-    """Payment methods we can genuinely offer. COD always works; online ones need
-    either real credentials, or the FAKE stand-in in DEBUG mode. The AI never
-    offers a payment option that would then fail at the last step."""
+    """Payment methods we can genuinely offer, in the order they should be offered.
+
+    COD always works. A NAMED gateway (jazzcash / easypaisa) is offered only when its
+    OWN credentials are configured — we never advertise a specific gateway we don't
+    actually have. When the fake stand-in is available it backs a single GENERIC
+    ONLINE option (shown to the customer as "online payment"); in DEBUG it also backs
+    the named gateways so their full flow is exercised in dev/tests. The AI never
+    offers a method that would fail at the last step — both preview_bill and
+    place_order refuse anything not in this list.
+    """
     methods = [PaymentMethod.COD]
-    fake_ok = _fake_stand_in_available()
+    # Real named gateways — only with their own credentials.
     for method, provider in PROVIDER_FOR_METHOD.items():
-        if is_configured(provider) or fake_ok:
+        if is_configured(provider):
             methods.append(method)
+    if _fake_stand_in_available():
+        # DEBUG (dev/tests) exercises the named-gateway flow through the fake
+        # provider too, so those stay available there.
+        if settings.debug:
+            for method in (PaymentMethod.JAZZCASH, PaymentMethod.EASYPAISA):
+                if method not in methods:
+                    methods.append(method)
+        # The generic demo online option — in DEBUG and on a non-debug demo deployment.
+        if PaymentMethod.ONLINE not in methods:
+            methods.append(PaymentMethod.ONLINE)
     return methods

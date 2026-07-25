@@ -272,11 +272,12 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "payment_method": {
                         "type": "string",
-                        "enum": ["cod", "jazzcash", "easypaisa"],
+                        "enum": ["cod", "jazzcash", "easypaisa", "online"],
                         "description": (
-                            "The method the customer chose. Determines the tax rate "
-                            "(cod is taxed higher than online), so the total changes "
-                            "with it. Defaults to cod."
+                            "The method the customer chose — pass one that is listed "
+                            "as available in the system message. Use 'online' for "
+                            "online payment. Determines the tax rate (cod is taxed "
+                            "higher than online). Do not omit it and do not guess."
                         ),
                     },
                     "coupon_code": {
@@ -327,14 +328,15 @@ TOOL_SCHEMAS = [
                     },
                     "payment_method": {
                         "type": "string",
-                        "enum": ["cod", "jazzcash", "easypaisa"],
+                        "enum": ["cod", "jazzcash", "easypaisa", "online"],
                         "description": (
-                            "How the customer wants to pay. Must match what the customer "
-                            "explicitly chose when you asked them (only ask if more than one "
-                            "payment method is available; otherwise use the only one). "
-                            "If they choose jazzcash or easypaisa the order is NOT confirmed "
-                            "until they pay — the tool result will include a payment_link "
-                            "you must send them."
+                            "How the customer wants to pay — one that is listed as "
+                            "available in the system message (only ask if more than one "
+                            "is available; otherwise use the only one). Use 'online' for "
+                            "online payment; do not name a specific gateway unless it is "
+                            "listed. If they pay online the order is NOT confirmed until "
+                            "they pay — the tool result will include a payment_link you "
+                            "must send them."
                         ),
                     },
                     "notes": {

@@ -34,8 +34,9 @@ import types
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
 
-from app.models import MessageDirection
+from app.models import MessageDirection, Order, OrderStatus, PaymentMethod
 from app.services import agent
 from app.services import conversations as convo
 
@@ -213,3 +214,64 @@ class TestReplayRegressions:
             "naming a shortlisted restaurant must SELECT it, not reset to a generic search"
         )
         assert replay.conversation.context.get("shown_menu_restaurant") == biryani.name
+
+    def test_5_online_payment_is_previewed_and_placed_without_downgrade(
+        self, replay, pizza, menu_item,
+    ):
+        """AB-5ABBE2 family: the customer picks online payment; it must be previewed
+        and placed AS online (8%), not previewed then silently downgraded to COD
+        (15%) at checkout. The test suite runs with the fake stand-in, so online is a
+        real available method here. One Chicken Tikka Pizza (Rs. 1150): online total
+        = 1150 + 8% (92.00) + 100 delivery = Rs. 1342.00."""
+        replay.turn(
+            "ek chicken tikka pizza order karni hai",
+            [
+                _completion(_msg(tool_calls=[
+                    _tc("t1", "get_menu", {"restaurant_id": pizza.id}),
+                    _tc("t2", "add_to_cart", {"menu_item_id": menu_item.id, "quantity": 1}),
+                ])),
+                _completion(_msg(
+                    content="Add kar di. Payment kis se karna hai — cash on delivery ya online payment?"
+                )),
+            ],
+        )
+
+        # Customer chooses online → model previews at the ONLINE rate and reads it back.
+        readback = replay.turn(
+            "online payment",
+            [
+                _completion(_msg(tool_calls=[_tc("p", "preview_bill", {"payment_method": "online"})])),
+                _completion(_msg(content=(
+                    "Aapka order:\n1x Chicken Tikka Pizza\n"
+                    "Subtotal: Rs. 1150\nTax: Rs. 92.00\nDelivery: Rs. 100.00\n"
+                    "Total: Rs. 1342.00\nConfirm karein?"
+                ))),
+            ],
+        )
+        assert agent._quoted_total(readback) == Decimal("1342.00"), (
+            "the read-back must be the online (8%) total, not the COD (15%) one"
+        )
+
+        # Customer confirms → order is placed AS online, awaiting payment, with a link.
+        replay.turn(
+            "haan confirm",
+            [
+                _completion(_msg(tool_calls=[_tc(
+                    "o", "place_order",
+                    {"payment_method": "online", "delivery_address": "House 1, Lahore"},
+                )])),
+                _completion(_msg(content=(
+                    "Order place ho gaya. Payment link: http://localhost:8000/pay/demo "
+                    "— pay karke confirm karein."
+                ))),
+            ],
+        )
+
+        order = replay.db.scalar(
+            select(Order).where(Order.customer_id == replay.conversation.customer_id)
+        )
+        assert order is not None, "the order must have been placed"
+        assert order.payment_method == PaymentMethod.ONLINE, "must not downgrade to COD"
+        assert order.tax_rate == Decimal("8.00")
+        assert order.total_amount == Decimal("1342.00")
+        assert order.status == OrderStatus.AWAITING_PAYMENT  # not confirmed until paid

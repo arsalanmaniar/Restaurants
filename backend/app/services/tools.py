@@ -1231,6 +1231,18 @@ def preview_bill(
     except ValueError:
         return {"error": f"Unknown payment method {payment_method!r}."}
 
+    # Validate availability HERE, exactly as place_order does — otherwise the model
+    # can read back a total for a method that placement then refuses, and the order
+    # silently falls back to a different (pricier) method. Same check, same message.
+    if method not in available_methods():
+        return {
+            "error": "unavailable_payment_method",
+            "message": (
+                f"{method.value} is not available. "
+                f"Offer: {', '.join(m.value for m in available_methods())}."
+            ),
+        }
+
     subtotal = sum(Decimal(line["price"]) * line["quantity"] for line in lines)
 
     # Coupons are validated read-only here (no redemption recorded) so the

@@ -71,6 +71,66 @@ def prepaid_order(db, cart_with_pizza, fake_gateway) -> tuple[Order, str]:
     return order, result["payment_link"]
 
 
+class TestOnlinePaymentMethod:
+    """The generic ONLINE method (labelled "online payment" to the customer),
+    backed by the FAKE provider for demo deployments. Offered consistently at BOTH
+    preview and placement so an unavailable choice can never sneak through preview
+    and then downgrade at checkout (the AB-5ABBE2 bait-and-switch)."""
+
+    def test_online_is_available_in_debug(self):
+        # The test suite runs with DEBUG=true, so the fake stand-in backs online.
+        assert PaymentMethod.ONLINE in registry.available_methods()
+
+    def test_online_order_previews_and_places_at_the_online_rate(self, db, cart_with_pizza):
+        preview = tools.preview_bill(db, cart_with_pizza, payment_method="online")
+        assert preview["tax_rate"] == "8.00"
+
+        result = tools.place_order(
+            db, cart_with_pizza, delivery_address="House 1, Lahore", payment_method="online"
+        )
+        assert result["payment_method"] == "online"
+        assert result.get("payment_link", "").startswith("http")
+        # preview and placement agree exactly — no divergence, no downgrade.
+        for field in ("subtotal", "tax_amount", "delivery_fee", "total"):
+            assert preview[field] == result[field], field
+
+        order = db.scalar(select(Order).where(Order.order_number == result["order_number"]))
+        assert order.payment_method == PaymentMethod.ONLINE
+        assert order.tax_rate == Decimal("8.00")
+        assert order.status == OrderStatus.AWAITING_PAYMENT  # not released until paid
+        assert order.payments[0].provider == PaymentProviderName.FAKE
+        assert order.payments[0].amount == order.total_amount
+
+    def test_online_unavailable_without_debug_or_demo_flag(
+        self, db, cart_with_pizza, monkeypatch,
+    ):
+        """A real production deployment (neither DEBUG nor the demo flag) offers COD
+        only, and preview_bill refuses online rather than showing a false total."""
+        monkeypatch.setattr(settings, "debug", False)
+        monkeypatch.setattr(settings, "demo_payments_enabled", False)
+
+        assert registry.available_methods() == [PaymentMethod.COD]
+        result = tools.preview_bill(db, cart_with_pizza, payment_method="online")
+        assert result["error"] == "unavailable_payment_method"
+        assert "total" not in result
+
+    def test_demo_flag_enables_online_without_debug_and_hides_gateways(
+        self, db, cart_with_pizza, monkeypatch,
+    ):
+        """The Render demo scenario: DEBUG off, demo flag on → COD + generic online,
+        and the named gateways are NOT advertised (no real credentials)."""
+        monkeypatch.setattr(settings, "debug", False)
+        monkeypatch.setattr(settings, "demo_payments_enabled", True)
+
+        methods = registry.available_methods()
+        assert methods == [PaymentMethod.COD, PaymentMethod.ONLINE]
+        assert PaymentMethod.JAZZCASH not in methods
+        assert PaymentMethod.EASYPAISA not in methods
+
+        preview = tools.preview_bill(db, cart_with_pizza, payment_method="online")
+        assert preview["tax_rate"] == "8.00" and "error" not in preview
+
+
 class TestPrepaidOrderIsHiddenUntilPaid:
     def test_order_starts_awaiting_payment(self, prepaid_order):
         order, _ = prepaid_order

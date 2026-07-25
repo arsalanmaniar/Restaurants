@@ -327,3 +327,15 @@ class TestPreviewGuard:
             db, cart_with_pizza, delivery_address="House 1", payment_method="cod"
         )
         assert "order_number" in result, result
+
+    def test_preview_bill_refuses_an_unavailable_method(
+        self, db, cart_with_pizza, monkeypatch,
+    ):
+        """preview_bill validates availability exactly like place_order — so a method
+        that placement would reject never gets a false read-back total (the AB-5ABBE2
+        bait-and-switch). No total, and no previewed_bill stamp for the bad method."""
+        monkeypatch.setattr(tools, "available_methods", lambda: [PaymentMethod.COD])
+        result = tools.preview_bill(db, cart_with_pizza, payment_method="jazzcash")
+        assert result["error"] == "unavailable_payment_method"
+        assert "total" not in result
+        assert "previewed_bill" not in (cart_with_pizza.context or {})

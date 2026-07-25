@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     # How long a customer has to pay before the order is auto-cancelled.
     payment_expiry_minutes: int = 15
 
+    # Demo online payments. When true, the FAKE provider backs a generic "online
+    # payment" option (a two-button demo checkout, no real money) EVEN when DEBUG is
+    # false — so a demo deployment can show a working online flow before real
+    # JazzCash/EasyPaisa credentials exist. Defaults OFF: it must be set explicitly
+    # (DEMO_PAYMENTS_ENABLED=true), and it makes "simulate successful payment"
+    # reachable, so it must never be on where real kitchens fulfil real orders.
+    demo_payments_enabled: bool = False
+
     # Browsers treat http://localhost:3010 and http://127.0.0.1:3010 as DIFFERENT origins,
     # so a dashboard opened on one while only the other is allowlisted fails CORS preflight
     # and the frontend reports a bare "Failed to fetch" with no useful detail. List both.

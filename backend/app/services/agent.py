@@ -236,7 +236,7 @@ Roman Urdu reference shapes (use these exact forms when replying in Roman Urdu):
 
   Aap kis restaurant se order karna chahenge?"
 - Menu intro: "Yeh items available hain:" then item — Rs. price lines, then a question.
-- Payment method (ONLY when more than one method is listed): "Payment kis se karna hai — cash on delivery ya online (JazzCash / EasyPaisa)?"
+- Payment method (ONLY when more than one is listed above): "Payment kis se karna hai — cash on delivery ya online payment?" Name ONLY the methods in the available list; never say JazzCash or EasyPaisa unless they are listed there.
 - Order read-back (AFTER payment method chosen and preview_bill called — use its exact numbers):
   "Aapka order:
   [items list with Rs. line totals]
@@ -350,7 +350,7 @@ ids and prices. NEVER guess a restaurant_id or menu_item_id.
 online are TAXED at different rates, so the total changes with how the customer \
 pays. Follow this exact order before place_order:
   1. PAYMENT METHOD FIRST. Check "Payment methods available right now" in the \
-system message. If MORE THAN ONE is listed (e.g. cod, jazzcash, easypaisa), ask \
+system message. If MORE THAN ONE is listed (e.g. cod, online), ask \
 the customer which one and WAIT for their answer. If only one is listed (usually \
 just cod), use it silently — do not ask.
   2. Call `preview_bill` with the chosen payment_method (and coupon_code if the \
@@ -382,9 +382,10 @@ you MUST include the exact URL verbatim in your reply), OR you have no link — 
 honestly. If the customer asks to switch payment method AFTER an order was already \
 placed as cod, tell them the order is committed to cash-on-delivery and cannot be \
 switched — do not fake a link, do not promise one is coming, do not offer to send one.
-- If the customer says "online" or "online payment" without picking a specific \
-gateway, ask "JazzCash ya EasyPaisa?" — do not assume. Both go through place_order \
-with the specific payment_method value ("jazzcash" or "easypaisa").
+- If the customer chooses online payment, pass payment_method "online" (the generic \
+online option). Do NOT ask "JazzCash ya EasyPaisa?" or name a specific gateway — \
+those are not connected yet; "online" is the available online method. An online \
+order is NOT confirmed until the customer pays via the link place_order returns.
 - If the customer REFERENCES a past order in words (e.g. "my last biryani", "the \
 Eid order", "wo office wala lunch", "wahi jo pichli baar", "same as last Tuesday"), \
 call `find_past_order` FIRST with a keyword from their message — never guess which \
@@ -727,7 +728,13 @@ def _payment_facts() -> str:
     offer things that then fail.
     """
     methods = [m.value for m in available_methods()]
-    return "Payment methods available right now: " + ", ".join(methods) + "."
+    return (
+        "Payment methods available right now: " + ", ".join(methods) + ". "
+        "Offer ONLY these, and use the value shown (say 'online payment' for the "
+        "'online' option). Do NOT name JazzCash or EasyPaisa, or any method not in "
+        "this list. If the customer asks for a method that is not listed, tell them "
+        "it is not available right now and offer what is."
+    )
 
 
 def _build_messages(db: Session, conversation: Conversation) -> list[dict]:

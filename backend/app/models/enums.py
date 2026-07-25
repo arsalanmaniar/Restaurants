@@ -26,6 +26,10 @@ class PaymentMethod(str, enum.Enum):
     JAZZCASH = "jazzcash"
     EASYPAISA = "easypaisa"
     CARD = "card"
+    # Generic online payment. Backed by the FAKE provider for demo deployments
+    # (no real money) until real JazzCash/EasyPaisa credentials exist; shown to
+    # the customer simply as "online payment". See services/payments/registry.py.
+    ONLINE = "online"
 
 
 class PaymentStatus(str, enum.Enum):
