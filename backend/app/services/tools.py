@@ -1527,6 +1527,25 @@ def place_order(
             ),
         }
 
+    # Issue 3 — the delivery-contact NAME is required (Phase D collected address +
+    # name + phone together). Prompt-only failed in AB-F6DF70: the model took a bare
+    # area name as the whole address and placed with no name. There is no sensible
+    # default for a name, so refuse and make the model ask — mirroring missing_address.
+    # The phone deliberately stays optional: it falls back to the WhatsApp number,
+    # which is a valid delivery contact, so hard-requiring a separate one is friction
+    # with no benefit. Gated on _has_any_outbound, like the guards above, so
+    # direct-tool callers are unaffected.
+    if _has_any_outbound(db, conversation) and not resolved_contact_name:
+        return {
+            "error": "missing_contact_name",
+            "message": (
+                "Ask the customer for the NAME of the person receiving the order "
+                "(and, in the same message, a delivery contact number if it differs "
+                "from their WhatsApp number — otherwise the WhatsApp number is used). "
+                "Then call place_order again with contact_name."
+            ),
+        }
+
     # The bill — subtotal, tax (rate from the payment method), delivery, total —
     # is computed in ONE place shared with preview_bill, so the total the customer
     # confirmed in the read-back is exactly the total we store and charge.

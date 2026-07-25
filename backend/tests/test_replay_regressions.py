@@ -258,7 +258,8 @@ class TestReplayRegressions:
             [
                 _completion(_msg(tool_calls=[_tc(
                     "o", "place_order",
-                    {"payment_method": "online", "delivery_address": "House 1, Lahore"},
+                    {"payment_method": "online", "delivery_address": "House 1, Lahore",
+                     "contact_name": "Test Customer"},
                 )])),
                 _completion(_msg(content=(
                     "Order place ho gaya. Payment link: http://localhost:8000/pay/demo "

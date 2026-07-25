@@ -364,76 +364,70 @@ class TestLoopDetection:
         assert reply == "Added."
 
 
-class TestUnderstatedTotalGuard:
-    """Bug 1, reply layer: the model reads back the pre-tax food subtotal as the
-    "Total", the customer would confirm it, and the order then charges subtotal +
-    tax + delivery. The understated number must never reach the customer."""
+class TestReadbackTotalGuard:
+    """Reply layer: any Total the model reads back must have been produced by a
+    preview_bill call this turn (Bug 1 + the AB-F6DF70 fabricated bill). A number the
+    model computed itself — a bare subtotal, or an invented rate/delivery — has no
+    matching preview and must never reach the customer."""
 
-    def test_detector_flags_subtotal_quoted_as_total(self, db, cart_with_pizza):
-        subtotal = _subtotal(cart_with_pizza)
+    def _preview_step(self, total):
+        return {"tool": "preview_bill", "args": "{}", "result": {"total": str(total)}}
+
+    def test_flags_a_total_with_no_preview_this_turn(self):
+        readback = "Aapka order:\nTotal: Rs. 1150\nConfirm karein?"
+        assert agent._readback_total_is_unbacked(readback, trace=[]) is True
+
+    def test_flags_a_fabricated_total_even_above_subtotal(self):
+        """The AB-F6DF70 case: Tax Rs. 284 (a made-up 10%) + Delivery Rs. 150, Total
+        Rs. 3274 — ABOVE the Rs. 2840 subtotal, so the old magnitude rule missed it.
+        With no preview backing it, it is caught."""
         readback = (
-            "Aapka order:\n2x Chicken Tikka Pizza\n"
-            f"Total: Rs. {subtotal:.0f}\nConfirm karein?"
+            "Subtotal: Rs. 2840\nTax: Rs. 284\nDelivery: Rs. 150\n"
+            "Total: Rs. 3274\nConfirm karein?"
         )
-        assert agent._understates_total(readback, cart_with_pizza) is True
+        assert agent._readback_total_is_unbacked(readback, trace=[]) is True
 
-    def test_detector_passes_a_correct_taxed_total(self, db, cart_with_pizza):
-        subtotal = _subtotal(cart_with_pizza)
-        # Any total above the food subtotal is plausible (tax + delivery added).
-        readback = f"Total: Rs. {subtotal + Decimal('500'):.0f}. Confirm karein?"
-        assert agent._understates_total(readback, cart_with_pizza) is False
+    def test_passes_a_total_backed_by_a_preview_this_turn(self):
+        readback = (
+            "Subtotal: Rs. 2840\nTax: Rs. 426\nDelivery: Rs. 80\n"
+            "Total: Rs. 3346.00\nConfirm karein?"
+        )
+        trace = [self._preview_step("3346.00")]
+        assert agent._readback_total_is_unbacked(readback, trace) is False
 
-    def test_detector_ignores_replies_that_quote_no_total(self, db, cart_with_pizza):
-        assert agent._understates_total("Aap ka naam kya hai?", cart_with_pizza) is False
+    def test_ignores_replies_that_quote_no_total(self):
+        assert agent._readback_total_is_unbacked("Aap ka naam kya hai?", trace=[]) is False
 
     def test_quoted_total_binds_the_total_line_not_the_subtotal_line(self):
         """A correct read-back lists both Subtotal and Total. The parser must bind
         the Total, never the (lower) Subtotal — 'total' hides inside 'Sub-total', so
-        without a leading word boundary every proper read-back would be mis-read as
-        understated."""
+        without a leading word boundary every proper read-back would be mis-read."""
         readback = (
             "Subtotal: Rs. 1150\nTax: Rs. 172.50\nDelivery: Rs. 100.00\n"
             "Total: Rs. 1422.50\nConfirm karein?"
         )
         assert agent._quoted_total(readback) == Decimal("1422.50")
 
-    def test_detector_flags_a_quote_below_the_previewed_total(
-        self, db, conversation, pizza, menu_item,
-    ):
-        """Subtotal + delivery but tax dropped: above the subtotal, so the subtotal
-        check misses it — but a preview_bill is on record, and the quote is below
-        that real total. Caught."""
-        tools.get_menu(db, conversation, restaurant_id=pizza.id)
-        tools.add_to_cart(db, conversation, menu_item_id=menu_item.id, quantity=2)
-        db.flush()
-        preview = tools.preview_bill(db, conversation, payment_method="cod")
-
-        # Quote the (subtotal + delivery) figure — real total minus the tax.
-        understated = Decimal(preview["subtotal"]) + Decimal(preview["delivery_fee"])
-        assert understated < Decimal(preview["total"])  # sanity: tax really was dropped
-        readback = f"Total: Rs. {understated:.0f}. Confirm karein?"
-        assert agent._understates_total(readback, conversation) is True
-
-    def test_understated_readback_is_suppressed_and_forces_preview(
+    def test_unbacked_readback_is_suppressed_and_forces_preview(
         self, db, conversation, pizza, menu_item, scripted_model,
     ):
-        """End to end through the tool loop: round 1 the model reads back the bare
-        subtotal as the Total; the guard suppresses it and forces preview_bill;
-        round 3 it produces a correct read-back. The customer only ever sees the
-        corrected reply, and preview_bill really was called."""
+        """End to end: round 1 the model reads back a self-computed total (no
+        preview_bill this turn); the guard suppresses it and forces preview_bill;
+        round 3 it reads back the real total. The customer only ever sees the
+        corrected reply."""
         tools.get_menu(db, conversation, restaurant_id=pizza.id)
         tools.add_to_cart(db, conversation, menu_item_id=menu_item.id, quantity=2)
         db.flush()
-        subtotal = _subtotal(conversation)
+        real = billing.compute_bill(
+            subtotal=_subtotal(conversation), delivery_fee=pizza.delivery_fee,
+            discount=Decimal("0.00"), method=PaymentMethod.COD,
+        ).total
 
-        understated = (
-            f"Aapka order:\n2x Chicken Tikka Pizza\nTotal: Rs. {subtotal:.0f}\n"
-            "Confirm karein?"
-        )
-        corrected = "Aapka order taiyar hai. Total: Rs. 9999. Confirm karein?"
+        fabricated = "Aapka order:\n2x Chicken Tikka Pizza\nTotal: Rs. 2999\nConfirm karein?"
+        corrected = f"Aapka order taiyar hai.\nTotal: Rs. {real}\nConfirm karein?"
         scripted_model(
             [
-                completion(message(content=understated)),
+                completion(message(content=fabricated)),
                 completion(
                     message(tool_calls=[tool_call("p", "preview_bill", {"payment_method": "cod"})])
                 ),
@@ -443,8 +437,8 @@ class TestUnderstatedTotalGuard:
 
         reply, trace = agent.generate_reply(db, conversation)
 
-        assert reply == corrected, "the understated read-back must not be what's sent"
-        assert agent._quoted_total(reply) > subtotal
+        assert reply == corrected, "the self-computed total must not be what's sent"
+        assert agent._quoted_total(reply) == real
         assert any(t["tool"] == "preview_bill" for t in trace), (
             "the guard must have forced a preview_bill call"
         )
@@ -453,23 +447,18 @@ class TestUnderstatedTotalGuard:
         self, db, conversation, pizza, menu_item, scripted_model,
     ):
         """The real WhatsApp transcript, verbatim. One Chicken Tikka Pizza (Rs. 1150).
-        The model read back "Total: Rs. 1150" — the bare food subtotal, tax and
-        delivery dropped. The true COD bill is 1150 + 15% tax (172.50) + 100 delivery
-        = Rs. 1422.50. The guard must catch the Rs. 1150 read-back, force preview_bill,
-        and the customer must only ever see the Rs. 1422.50 total."""
+        The model read back "Total: Rs. 1150" — the bare food subtotal. The true COD
+        bill is 1150 + 15% (172.50) + 100 delivery = Rs. 1422.50. The guard must catch
+        the Rs. 1150 read-back, force preview_bill, and the customer only ever sees
+        Rs. 1422.50."""
         tools.get_menu(db, conversation, restaurant_id=pizza.id)
         tools.add_to_cart(db, conversation, menu_item_id=menu_item.id, quantity=1)
         db.flush()
+        assert _subtotal(conversation) == Decimal("1150.00"), "one pizza = Rs. 1150"
 
-        subtotal = _subtotal(conversation)
-        assert subtotal == Decimal("1150.00"), "pins the transcript: one pizza = Rs. 1150"
-
-        # The real, correct bill the corrected read-back should carry.
         bill = billing.compute_bill(
-            subtotal=Decimal("1150.00"),
-            delivery_fee=pizza.delivery_fee,
-            discount=Decimal("0.00"),
-            method=PaymentMethod.COD,
+            subtotal=Decimal("1150.00"), delivery_fee=pizza.delivery_fee,
+            discount=Decimal("0.00"), method=PaymentMethod.COD,
         )
         assert bill.total == Decimal("1422.50")
 
@@ -479,9 +468,8 @@ class TestUnderstatedTotalGuard:
             f"Subtotal: Rs. 1150\nTax: Rs. {bill.tax_amount}\n"
             f"Delivery: Rs. {bill.delivery_fee}\nTotal: Rs. {bill.total}\nConfirm karein?"
         )
-
-        # Sanity: the detector really does flag the transcript's Rs. 1150 read-back.
-        assert agent._understates_total(understated, conversation) is True
+        # Sanity: the bare Rs. 1150, with no preview this turn, is unbacked.
+        assert agent._readback_total_is_unbacked(understated, trace=[]) is True
 
         scripted_model(
             [
@@ -522,11 +510,11 @@ class TestSwitchToOnlineAfterCodGuard:
             db, conversation, "mera order kahan hai?", trace=[]
         ) is False
 
-    def test_detector_does_not_fire_while_a_new_order_is_being_built(
+    def test_detector_does_not_fire_while_a_genuinely_new_order_is_being_built(
         self, db, cod_order, conversation,
     ):
-        """A non-empty cart means 'online' is a payment-method choice for the order
-        in progress, not a switch of the placed one."""
+        """A non-empty cart whose items DON'T match the placed order is a real new
+        order — 'online' is its payment-method choice, not a switch. Must not fire."""
         conversation.cart = {
             "items": [{
                 "menu_item_id": 1, "restaurant_id": 1,
@@ -536,6 +524,23 @@ class TestSwitchToOnlineAfterCodGuard:
         assert agent._switch_to_online_after_cod(
             db, conversation, "online se pay karunga", trace=[]
         ) is False
+
+    def test_detector_fires_when_cart_is_a_rebuild_of_the_placed_order(
+        self, db, cod_order, conversation, menu_item,
+    ):
+        """AB-F6DF70 issue 5: on the online-payment request the model RE-ADDED the
+        just-placed order's items, so the cart is non-empty but is a rebuild. The old
+        cart-empty gate was defeated; matching the cart against the order catches it."""
+        # cod_order == cart_with_pizza == 2x this menu_item. Rebuild the same cart.
+        conversation.cart = {
+            "items": [{
+                "menu_item_id": menu_item.id, "restaurant_id": menu_item.restaurant_id,
+                "name": menu_item.name, "price": "100.00", "quantity": 2, "notes": None,
+            }]
+        }
+        assert agent._switch_to_online_after_cod(
+            db, conversation, "Online payment ho sakti h Kia?", trace=[]
+        ) is True
 
     def test_detector_does_not_fire_when_this_turn_placed_an_order(
         self, db, cod_order, conversation,
@@ -571,6 +576,17 @@ class TestSwitchToOnlineAfterCodGuard:
         self, db, cod_order, conversation,
     ):
         cod_order.status = OrderStatus.CANCELLED
+        db.flush()
+        assert agent._switch_to_online_after_cod(
+            db, conversation, "online payment", trace=[]
+        ) is False
+
+    def test_detector_does_not_fire_when_the_cod_order_was_delivered(
+        self, db, cod_order, conversation,
+    ):
+        """A delivered COD order is done — payment happened at the door; there is
+        nothing to switch."""
+        cod_order.status = OrderStatus.DELIVERED
         db.flush()
         assert agent._switch_to_online_after_cod(
             db, conversation, "online payment", trace=[]

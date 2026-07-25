@@ -269,7 +269,8 @@ class TestPreviewGuard:
 
         tools.preview_bill(db, conversation, payment_method="cod")
         result = tools.place_order(
-            db, conversation, delivery_address="House 1", payment_method="cod"
+            db, conversation, delivery_address="House 1", payment_method="cod",
+            contact_name="Test Customer",
         )
 
         assert "order_number" in result, result
@@ -312,7 +313,8 @@ class TestPreviewGuard:
         _seed_outbound(db, conversation)
         tools.preview_bill(db, conversation, payment_method="cod")
         tools.place_order(
-            db, conversation, delivery_address="House 1", payment_method="cod"
+            db, conversation, delivery_address="House 1", payment_method="cod",
+            contact_name="Test Customer",
         )
 
         assert "previewed_bill" not in (conversation.context or {})

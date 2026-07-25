@@ -142,6 +142,26 @@ def _placed_an_order_this_turn(trace: list[dict]) -> bool:
     return False
 
 
+def _cart_matches_order(conversation: Conversation, order: Order) -> bool:
+    """Whether the current cart is just a REBUILD of this order — the same
+    (menu_item_id, quantity) multiset. The model has been seen re-adding a
+    just-placed order's items when the customer asks to switch payment; that rebuild
+    must not be mistaken for a genuinely new order (AB-F6DF70, issue 5)."""
+    cart = [
+        (int(line["menu_item_id"]), int(line["quantity"]))
+        for line in (conversation.cart or {}).get("items", [])
+        if line.get("menu_item_id") is not None
+    ]
+    if not cart:
+        return False
+    ordered = [
+        (int(i.menu_item_id), int(i.quantity))
+        for i in order.items
+        if i.menu_item_id is not None
+    ]
+    return sorted(cart) == sorted(ordered)
+
+
 def _switch_to_online_after_cod(
     db: Session, conversation: Conversation, body: str | None, trace: list[dict]
 ) -> bool:
@@ -151,20 +171,20 @@ def _switch_to_online_after_cod(
     the request. Deterministically steer them to place a new online order instead
     of dropping it on the floor (Bug 2).
 
-    Fires only when ALL hold, to avoid hijacking a normal payment-method choice:
+    Fires only when ALL hold, to avoid hijacking a genuinely new order:
       * the inbound asks to pay online / names an online gateway,
-      * the cart is EMPTY (a non-empty cart means a new order is being built, where
-        "online" is a method choice, not a switch),
-      * this turn placed no order (a correctly-built new online order, with its own
-        real link, must pass through untouched),
-      * the customer's most recent order is a live (non-cancelled) COD order.
+      * this turn placed no order (a real new online order, with its own link, must
+        pass through untouched),
+      * the customer's most recent order is a LIVE COD order (not delivered/cancelled),
+      * the cart is EMPTY, or it is just a REBUILD of that order (same items). The
+        old gate bailed on ANY non-empty cart, so the model re-adding the placed
+        order's items defeated it (AB-F6DF70); matching the cart against the order
+        catches that while still stepping aside for a genuinely different new order.
     """
     if not body:
         return False
     lowered = body.lower()
     if not any(pat in lowered for pat in _ONLINE_SWITCH_PATTERNS):
-        return False
-    if (conversation.cart or {}).get("items"):
         return False
     if _placed_an_order_this_turn(trace):
         return False
@@ -176,10 +196,14 @@ def _switch_to_online_after_cod(
     )
     if last_order is None:
         return False
-    return (
-        last_order.payment_method == PaymentMethod.COD
-        and last_order.status != OrderStatus.CANCELLED
-    )
+    if last_order.payment_method != PaymentMethod.COD:
+        return False
+    if last_order.status in (OrderStatus.CANCELLED, OrderStatus.DELIVERED):
+        return False
+    cart_lines = (conversation.cart or {}).get("items", [])
+    if cart_lines and not _cart_matches_order(conversation, last_order):
+        return False  # a genuinely different new order is being built
+    return True
 
 SYSTEM_PROMPT = """You are AbhiAya, a professional WhatsApp assistant that takes food \
 orders for a network of restaurants in Pakistan.
@@ -869,34 +893,33 @@ def _quoted_total(text: str | None) -> Decimal | None:
         return None
 
 
-def _understates_total(reply: str | None, conversation: Conversation) -> bool:
-    """True when a read-back quotes a Total that has dropped tax and/or delivery.
+def _readback_total_is_unbacked(reply: str | None, trace: list[dict]) -> bool:
+    """True when a reply quotes an order Total that no preview_bill call this turn
+    produced.
 
-    The bait-and-switch (Bug 1): the model reads the pre-tax food subtotal back as
-    the "Total", the customer says haan, and the order then charges subtotal + tax
-    + delivery — more than they agreed to. A genuine total is ALWAYS greater than
-    the food subtotal (tax > 0, delivery >= 0), so a quoted total at or below the
-    subtotal proves tax/delivery were dropped. When a preview_bill total is on
-    record for the current cart, a quote materially below THAT is caught too (e.g.
-    subtotal + delivery quoted, but tax omitted)."""
+    The read-back bait-and-switch family — Bug 1 (bare subtotal read back as the
+    Total) AND the AB-F6DF70 fabricated bill (Rs. 284 tax = 10% on Rs. 2840, plus a
+    made-up Rs. 150 delivery, total ABOVE the subtotal). Rather than guess at the
+    number's magnitude — a proxy the model defeats by fabricating a total above the
+    subtotal — tie the quoted total to ground truth: it MUST equal a preview_bill
+    total from THIS turn's trace. A number the model computed itself has no matching
+    preview and is caught. Requiring a same-turn preview (not a stale
+    context.previewed_bill) also stops an old total from backing a changed cart."""
     quoted = _quoted_total(reply)
     if quoted is None:
         return False
-    lines = (conversation.cart or {}).get("items", [])
-    if not lines:
-        return False
-    subtotal = sum(Decimal(line["price"]) * line["quantity"] for line in lines)
-    if quoted <= subtotal:
-        return True
-    previewed = (conversation.context or {}).get("previewed_bill")
-    if isinstance(previewed, dict):
+    for step in trace:
+        if step.get("tool") != "preview_bill":
+            continue
+        result = step.get("result")
+        if not isinstance(result, dict) or result.get("total") is None:
+            continue
         try:
-            reference = Decimal(str(previewed.get("total")))
+            if abs(quoted - Decimal(str(result["total"]))) <= Decimal("0.01"):
+                return False  # backed by a real preview this turn
         except (ArithmeticError, ValueError, TypeError):
-            reference = None
-        if reference is not None and quoted < reference - Decimal("0.50"):
-            return True
-    return False
+            continue
+    return True  # quotes a Total that no preview_bill this turn produced
 
 
 # Bilingual uncertainty markers. Their PRESENCE means the model is hedging a weak
@@ -1124,17 +1147,16 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                 )
                 continue
 
-            # Bug 1 — understated read-back. The model quoted a Total that dropped
-            # tax and/or delivery (it is at or below the pre-tax food subtotal).
-            # That number must never reach the customer, so suppress this reply and
-            # force preview_bill; the next round produces a correct read-back. Fires
-            # once — if the real, discounted total is genuinely low, the regenerated
-            # reply is sent as-is rather than looping.
-            if _understates_total(text, conversation) and not total_corrected_once:
+            # Bug 1 + AB-F6DF70 — read-back total not produced by preview_bill. The
+            # model stated a Total it computed itself (a bare subtotal, or a made-up
+            # rate like 10% + an invented delivery fee). That number must never reach
+            # the customer, so suppress this reply and force preview_bill; the next
+            # round produces a correct read-back. Fires once.
+            if not total_corrected_once and _readback_total_is_unbacked(text, trace):
                 total_corrected_once = True
                 force_next = True
                 logger.info(
-                    "conversation %s read back an understated total (%r); forcing preview_bill",
+                    "conversation %s read back a total no preview_bill produced (%r); forcing preview_bill",
                     conversation.id,
                     text[:80],
                 )
@@ -1142,12 +1164,11 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                     {
                         "role": "system",
                         "content": (
-                            "The total you just read back is lower than the food "
-                            "subtotal, so it is missing tax and/or delivery — the "
-                            "customer must never be quoted that number. Call "
+                            "The total you just read back was NOT produced by "
+                            "preview_bill — you cannot compute the bill yourself. Call "
                             "preview_bill with the customer's payment method now and "
                             "read back its EXACT figures (subtotal, tax, delivery, "
-                            "total). Do not compute any amount yourself."
+                            "total). Never invent a tax rate or delivery fee."
                         ),
                     }
                 )

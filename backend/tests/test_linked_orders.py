@@ -50,7 +50,9 @@ def _preview_then_place(db, conversation, **kwargs):
     """A live conversation always previews the exact taxed bill and reads it back
     before placing — and Bug 1's place_order guard now REQUIRES that preview for
     any conversation that has an outbound (these tests seed one). Mirror the real
-    flow: preview this cart with the same method/coupon, then place."""
+    flow: preview this cart with the same method/coupon, then place. A real flow also
+    collects a delivery-contact name (Issue 3 guard), so supply one by default."""
+    kwargs.setdefault("contact_name", "Test Customer")
     tools.preview_bill(
         db,
         conversation,

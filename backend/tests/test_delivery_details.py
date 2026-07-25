@@ -12,7 +12,8 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
-from app.models import Order
+from app.models import MessageDirection, Order
+from app.services import conversations as convo_svc
 from app.services import tools
 
 
@@ -23,6 +24,68 @@ def _place(db, conversation, **kwargs):
     return result, db.scalar(
         select(Order).where(Order.order_number == result["order_number"])
     )
+
+
+def _seed_payment_ack(db, conversation):
+    """Log an outbound that looks like a real, model-driven flow (and satisfies the
+    silent-COD guard, so a COD placement reaches the contact-name guard)."""
+    convo_svc.log_message(
+        db, conversation, MessageDirection.OUTBOUND,
+        "Payment kis se karna hai — cod, jazzcash, ya easypaisa?",
+    )
+    db.flush()
+
+
+class TestContactNameRequiredInRealFlow:
+    """Issue 3 (AB-F6DF70): in a live conversation, the delivery-contact NAME is a
+    hard requirement — the model can no longer silently place with just a bare area
+    name. The phone stays optional (falls back to the WhatsApp number)."""
+
+    def _ready(self, db, conversation):
+        _seed_payment_ack(db, conversation)
+        tools.preview_bill(db, conversation, payment_method="cod")  # pass the Bug 1 guard
+
+    def test_real_flow_without_a_name_is_refused_and_places_nothing(
+        self, db, cart_with_pizza,
+    ):
+        self._ready(db, cart_with_pizza)
+        result = tools.place_order(
+            db, cart_with_pizza, delivery_address="Ramchorline Karachi", payment_method="cod"
+        )
+        assert result["error"] == "missing_contact_name"
+        assert db.scalar(
+            select(Order).where(Order.customer_id == cart_with_pizza.customer_id)
+        ) is None
+
+    def test_real_flow_places_once_a_name_is_given(self, db, cart_with_pizza):
+        self._ready(db, cart_with_pizza)
+        result = tools.place_order(
+            db, cart_with_pizza, delivery_address="Ramchorline Karachi",
+            payment_method="cod", contact_name="Ayesha",
+        )
+        assert "order_number" in result, result
+
+    def test_phone_still_defaults_to_the_whatsapp_number(self, db, cart_with_pizza):
+        """Name is required; phone is NOT — an unspecified phone falls back to the
+        WhatsApp number, so there's no redundant 'phone?' ask in the common case."""
+        self._ready(db, cart_with_pizza)
+        wa = cart_with_pizza.customer.whatsapp_number
+        result = tools.place_order(
+            db, cart_with_pizza, delivery_address="Ramchorline Karachi",
+            payment_method="cod", contact_name="Ayesha",
+        )
+        order = db.scalar(select(Order).where(Order.order_number == result["order_number"]))
+        assert order.contact_name == "Ayesha"
+        assert order.contact_phone == wa
+
+    def test_direct_tool_call_without_an_outbound_does_not_require_a_name(
+        self, db, cart_with_pizza,
+    ):
+        """Escape hatch: a direct-tool / seed caller (no outbound) is unaffected."""
+        result = tools.place_order(
+            db, cart_with_pizza, delivery_address="Ramchorline Karachi", payment_method="cod"
+        )
+        assert "order_number" in result, result
 
 
 class TestContactSnapshot:
