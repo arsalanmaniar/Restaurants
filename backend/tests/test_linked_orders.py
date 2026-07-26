@@ -51,13 +51,16 @@ def _preview_then_place(db, conversation, **kwargs):
     before placing — and Bug 1's place_order guard now REQUIRES that preview for
     any conversation that has an outbound (these tests seed one). Mirror the real
     flow: preview this cart with the same method/coupon, then place. A real flow also
-    collects a delivery-contact name (Issue 3 guard), so supply one by default."""
+    collects a delivery-contact name (Issue 3 guard), so supply one by default — and
+    the one-bill gate means the SAME delivery details go to preview_bill too."""
     kwargs.setdefault("contact_name", "Test Customer")
     tools.preview_bill(
         db,
         conversation,
         payment_method=kwargs.get("payment_method", "cod"),
         coupon_code=kwargs.get("coupon_code"),
+        delivery_address=kwargs.get("delivery_address") or "House 1, DHA Lahore",
+        contact_name=kwargs["contact_name"],
     )
     return tools.place_order(db, conversation, **kwargs)
 

@@ -1206,6 +1206,8 @@ def preview_bill(
     conversation: Conversation,
     payment_method: str = "cod",
     coupon_code: str | None = None,
+    delivery_address: str | None = None,
+    contact_name: str | None = None,
 ) -> dict:
     """The exact bill place_order will produce for the current cart and payment
     method. Places nothing and does not touch the cart; it does record a small
@@ -1217,6 +1219,16 @@ def preview_bill(
     pay. This is what lets the model read the correct taxed total back BEFORE
     placing the order, without ever doing the arithmetic itself. place_order
     recomputes everything from scratch and never trusts these numbers.
+
+    Issue 3 — the ONE-BILL sequencing gate. The customer must see a bill exactly
+    once, after EVERYTHING is settled. In the reported conversation they got two:
+    a fabricated Rs. 0-tax one before the payment method was chosen, then the real
+    one before the address had been collected. The delivery details do not change
+    a single number here (delivery fee is a flat per-restaurant charge) — this
+    gate is purely about ORDER OF EVENTS, and it is deterministic because
+    prompt-only sequencing is exactly what failed in AB-F6DF70. Gated on
+    `_has_any_outbound` like the place_order guards, so direct-tool callers
+    (tests / seeds) are unaffected.
     """
     lines = list((conversation.cart or {}).get("items", []))
     if not lines:
@@ -1242,6 +1254,45 @@ def preview_bill(
                 f"Offer: {', '.join(m.value for m in available_methods())}."
             ),
         }
+
+    # Delivery details, resolved exactly as place_order resolves them (passed
+    # argument → saved default address → shared map pin), so a returning customer
+    # with an address on file is never asked again. The pin is PEEKED, never
+    # consumed: place_order still needs it to attach coordinates to the order.
+    customer = conversation.customer
+    resolved_address = (delivery_address or "").strip() or None
+    if not resolved_address:
+        default = next((a for a in customer.addresses if a.is_default), None)
+        resolved_address = default.address_text if default else None
+    if not resolved_address:
+        pin = _peek_shared_location(conversation)
+        if pin is not None:
+            resolved_address = _map_pin_address(pin)
+    resolved_contact_name = (contact_name or "").strip() or customer.name
+
+    # No bill before the delivery details exist. Both messages ask for everything
+    # still outstanding in ONE go — the customer must not be interrogated field by
+    # field, and the next preview must be the last.
+    if _has_any_outbound(db, conversation):
+        if not resolved_address:
+            return {
+                "error": "missing_address",
+                "message": (
+                    "Do NOT show a bill yet. Ask the customer for the FULL delivery "
+                    "address (house/flat number, area, city) and the NAME of the "
+                    "person receiving the order in ONE message, then call "
+                    "preview_bill again with delivery_address and contact_name."
+                ),
+            }
+        if not resolved_contact_name:
+            return {
+                "error": "missing_contact_name",
+                "message": (
+                    "Do NOT show a bill yet. Ask the customer for the NAME of the "
+                    "person receiving the order, then call preview_bill again with "
+                    "contact_name."
+                ),
+            }
 
     subtotal = sum(Decimal(line["price"]) * line["quantity"] for line in lines)
 
@@ -1289,6 +1340,10 @@ def preview_bill(
         "delivery_fee": _money(bill.delivery_fee),
         "discount_amount": _money(discount_amount),
         "total": _money(bill.total),
+        # Echoed so the read-back's Address/name lines come from what the system
+        # actually resolved, not from what the model remembers.
+        "delivery_address": resolved_address,
+        "contact_name": resolved_contact_name,
         "items": [
             {
                 "name": line["name"],
@@ -1309,27 +1364,43 @@ def preview_bill(
     return result
 
 
-def _consume_shared_location(conversation: Conversation) -> tuple[float, float] | None:
-    """Pull a map pin the customer shared (via the webhook) out of conversation
-    context, and clear it so a later order in the same chat can't inherit stale
-    coordinates. Returns (lat, lng) or None.
+def _peek_shared_location(conversation: Conversation) -> tuple[float, float] | None:
+    """Read a shared map pin WITHOUT consuming it. Returns (lat, lng) or None.
+
+    preview_bill needs to know whether an address exists, but must not destroy the
+    pin doing so — place_order consumes it later and would otherwise find nothing,
+    silently dropping the coordinates off the order.
 
     The webhook stores this under context['delivery_location'] when WhatsApp
     delivers a location-type message (see api/webhooks.py)."""
-    context = conversation.context or {}
-    loc = context.get("delivery_location")
+    loc = (conversation.context or {}).get("delivery_location")
     if not isinstance(loc, dict):
         return None
     lat, lng = loc.get("lat"), loc.get("lng")
-    new_context = dict(context)
-    new_context.pop("delivery_location", None)
-    conversation.context = new_context
     if lat is None or lng is None:
         return None
     try:
         return float(lat), float(lng)
     except (TypeError, ValueError):
         return None
+
+
+def _map_pin_address(location: tuple[float, float]) -> str:
+    """A shared pin rendered as address text, so an order with only a pin is still
+    deliverable. Shared by preview_bill and place_order so both show the same thing."""
+    return f"Map pin: https://maps.google.com/?q={location[0]},{location[1]}"
+
+
+def _consume_shared_location(conversation: Conversation) -> tuple[float, float] | None:
+    """Pull a map pin the customer shared out of conversation context, and clear it
+    so a later order in the same chat can't inherit stale coordinates."""
+    location = _peek_shared_location(conversation)
+    context = conversation.context or {}
+    if "delivery_location" in context:
+        new_context = dict(context)
+        new_context.pop("delivery_location", None)
+        conversation.context = new_context
+    return location
 
 
 def place_order(

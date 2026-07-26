@@ -364,18 +364,73 @@ class TestLoopDetection:
         assert reply == "Added."
 
 
-class TestReadbackTotalGuard:
-    """Reply layer: any Total the model reads back must have been produced by a
-    preview_bill call this turn (Bug 1 + the AB-F6DF70 fabricated bill). A number the
-    model computed itself — a bare subtotal, or an invented rate/delivery — has no
-    matching preview and must never reach the customer."""
+class TestReadbackBillGuard:
+    """Reply layer: any BILL the model shows must have been produced by a preview_bill
+    call this turn (Bug 1, the AB-F6DF70 fabricated bill, and Issue 3's zero-tax bill).
+    A number the model computed itself — a bare subtotal, an invented rate/delivery, or
+    a Rs. 0 tax — has no matching preview and must never reach the customer.
+
+    Two ways in: a quoted Total must MATCH a preview this turn, and a bill-SHAPED
+    message (two or more distinct component lines) requires a preview to have run at
+    all — which is what catches a fabricated bill whose Total line the quoted-total
+    parser alone would miss."""
 
     def _preview_step(self, total):
         return {"tool": "preview_bill", "args": "{}", "result": {"total": str(total)}}
 
+    # --- bill-shape detection (Issue 3) ---------------------------------------
+
+    def test_zero_tax_bill_block_is_caught_even_with_no_preview(self):
+        """The exact Issue 3 first bill: shown BEFORE the payment method was chosen,
+        so tax and delivery were filled in as Rs. 0. Nothing produced it."""
+        premature = (
+            "Aapka order:\n1x Chicken Tikka Pizza\n"
+            "Subtotal Rs. 1150\nTax: Rs. 0\nDelivery: Rs. 0\nTotal: Rs. 1150"
+        )
+        assert agent._looks_like_a_bill(premature) is True
+        assert agent._readback_bill_is_unbacked(premature, trace=[]) is True
+
+    def test_a_lone_total_is_not_bill_shaped(self):
+        """The false-positive control. A budget estimate ("total Rs. 580") and an
+        order-status reply quote a total with no preview behind them and must keep
+        their existing behaviour — only the quoted-total rule may apply to them, not
+        the new bill-shape rule."""
+        assert agent._looks_like_a_bill("Ye sab milakar total Rs. 580 ka hai.") is False
+        assert agent._looks_like_a_bill("Order AB-1234 ka total Rs. 1422.50 hai.") is False
+
+    def test_two_distinct_components_are_bill_shaped(self):
+        assert agent._looks_like_a_bill(
+            "Subtotal: Rs. 1150\nDelivery: Rs. 100"
+        ) is True
+
+    def test_subtotal_alone_does_not_count_as_a_total_label(self):
+        """'total' hides inside 'Subtotal' — without the word boundary a single
+        Subtotal line would look like two components and trip the guard."""
+        assert agent._looks_like_a_bill("Subtotal: Rs. 1150") is False
+
+    def test_bill_shaped_reply_backed_by_a_preview_passes(self):
+        """A real read-back is bill-shaped by design; a preview this turn clears it."""
+        readback = (
+            "Subtotal: Rs. 1150\nTax: Rs. 92.00\nDelivery: Rs. 100.00\n"
+            "Total: Rs. 1342.00"
+        )
+        assert agent._readback_bill_is_unbacked(
+            readback, [self._preview_step("1342.00")]
+        ) is False
+
+    def test_bill_without_a_parseable_total_still_needs_a_preview(self):
+        """Bill-shaped but no Total line to compare — the preview requirement is what
+        catches it, since there is no number to match."""
+        partial = "Subtotal: Rs. 1150\nDelivery: Rs. 100"
+        assert agent._quoted_total(partial) is None
+        assert agent._readback_bill_is_unbacked(partial, trace=[]) is True
+        assert agent._readback_bill_is_unbacked(
+            partial, [self._preview_step("1342.00")]
+        ) is False
+
     def test_flags_a_total_with_no_preview_this_turn(self):
         readback = "Aapka order:\nTotal: Rs. 1150\nConfirm karein?"
-        assert agent._readback_total_is_unbacked(readback, trace=[]) is True
+        assert agent._readback_bill_is_unbacked(readback, trace=[]) is True
 
     def test_flags_a_fabricated_total_even_above_subtotal(self):
         """The AB-F6DF70 case: Tax Rs. 284 (a made-up 10%) + Delivery Rs. 150, Total
@@ -385,7 +440,7 @@ class TestReadbackTotalGuard:
             "Subtotal: Rs. 2840\nTax: Rs. 284\nDelivery: Rs. 150\n"
             "Total: Rs. 3274\nConfirm karein?"
         )
-        assert agent._readback_total_is_unbacked(readback, trace=[]) is True
+        assert agent._readback_bill_is_unbacked(readback, trace=[]) is True
 
     def test_passes_a_total_backed_by_a_preview_this_turn(self):
         readback = (
@@ -393,10 +448,10 @@ class TestReadbackTotalGuard:
             "Total: Rs. 3346.00\nConfirm karein?"
         )
         trace = [self._preview_step("3346.00")]
-        assert agent._readback_total_is_unbacked(readback, trace) is False
+        assert agent._readback_bill_is_unbacked(readback, trace) is False
 
     def test_ignores_replies_that_quote_no_total(self):
-        assert agent._readback_total_is_unbacked("Aap ka naam kya hai?", trace=[]) is False
+        assert agent._readback_bill_is_unbacked("Aap ka naam kya hai?", trace=[]) is False
 
     def test_quoted_total_binds_the_total_line_not_the_subtotal_line(self):
         """A correct read-back lists both Subtotal and Total. The parser must bind
@@ -469,7 +524,7 @@ class TestReadbackTotalGuard:
             f"Delivery: Rs. {bill.delivery_fee}\nTotal: Rs. {bill.total}\nConfirm karein?"
         )
         # Sanity: the bare Rs. 1150, with no preview this turn, is unbacked.
-        assert agent._readback_total_is_unbacked(understated, trace=[]) is True
+        assert agent._readback_bill_is_unbacked(understated, trace=[]) is True
 
         scripted_model(
             [

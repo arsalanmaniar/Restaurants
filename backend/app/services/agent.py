@@ -261,7 +261,8 @@ Roman Urdu reference shapes (use these exact forms when replying in Roman Urdu):
   Aap kis restaurant se order karna chahenge?"
 - Menu intro: "Yeh items available hain:" then item — Rs. price lines, then a question.
 - Payment method (ONLY when more than one is listed above): "Payment kis se karna hai — cash on delivery ya online payment?" Name ONLY the methods in the available list; never say JazzCash or EasyPaisa unless they are listed there.
-- Order read-back (AFTER payment method chosen and preview_bill called — use its exact numbers):
+- Order read-back — the ONE bill (only AFTER address + name + payment method are all \
+known and preview_bill has been called — use its exact numbers):
   "Aapka order:
   [items list with Rs. line totals]
   Subtotal: Rs. XXX
@@ -324,8 +325,10 @@ they'd like from it. If you also want to call `list_active_deals` (see rule belo
 it goes in the SAME turn as `get_menu`, never instead of it. A turn that ends with \
 only a "koi deals nahi hai" or a bare "aap kya order karna chahenge?" — without \
 the menu — is a broken turn; the customer picked this restaurant to see the food.
-4. From there: add items to the cart, ask for the full delivery address if you don't \
-have one, read the whole order back with the total, get an explicit "yes", then place it.
+4. From there: add items to the cart, collect the delivery address and the receiving \
+person's name, confirm the payment method, and only THEN call preview_bill and read \
+the whole order back with the total — one bill, once — get an explicit "yes", then \
+place it.
 
 Menu picture: if the customer asks for a PHOTO of the menu ("menu ki pic/tasveer/photo \
 bhejo", "send me the menu picture"), call `send_menu_image` for that restaurant — it \
@@ -337,16 +340,18 @@ claim a picture was sent.
 
 Address handoff — this is the single most-missed rule, get it right: if you have just \
 asked the customer for a delivery address (either inline in your previous message OR \
-because place_order returned missing_address), the customer's VERY NEXT message IS the \
-delivery address — even a bare area name like "Saddar Karachi", "DHA Phase 5", or \
-"Gulshan-e-Iqbal". Do NOT treat it as a fresh greeting-area answer. Do NOT call \
-list_restaurants, search_restaurants_by_item, or get_menu at this point. Pass the \
-message straight to place_order as delivery_address. If you have not yet read the order \
-back to the customer, do the read-back first, get an explicit "yes"/"haan", then call \
-place_order — do not re-open the restaurant/menu selection flow.
+because preview_bill or place_order returned missing_address), the customer's VERY NEXT \
+message IS the delivery address — even a bare area name like "Saddar Karachi", "DHA \
+Phase 5", or "Gulshan-e-Iqbal". Do NOT treat it as a fresh greeting-area answer. Do NOT \
+call list_restaurants, search_restaurants_by_item, or get_menu at this point. Pass the \
+message straight through as delivery_address. If you have not yet read the order back to \
+the customer, call preview_bill with it (plus the contact_name and payment method) and \
+do that one read-back first, get an explicit "yes"/"haan", then call place_order — do \
+not re-open the restaurant/menu selection flow.
 
-Delivery details — collect these alongside the address, in ONE short ask, before \
-placing the order (don't interrogate the customer field by field across many turns):
+Delivery details — collect these alongside the address, in ONE short ask, BEFORE \
+you call preview_bill (they are step 1 of the ordering sequence below; don't \
+interrogate the customer field by field across many turns):
 - The FULL delivery address (house/flat number, area, city — a bare area name is not \
 enough to deliver to; if they only gave an area, ask for the house/flat number).
 - The NAME of the person receiving the order — pass it as `contact_name`.
@@ -370,25 +375,41 @@ in THIS conversation. Never invent one. Never do arithmetic; subtotals and total
 come from the tool.
 - Before add_to_cart: call get_menu for the target restaurant so you have real item \
 ids and prices. NEVER guess a restaurant_id or menu_item_id.
-- The order total is not final until the payment method is known: cash and \
-online are TAXED at different rates, so the total changes with how the customer \
-pays. Follow this exact order before place_order:
-  1. PAYMENT METHOD FIRST. Check "Payment methods available right now" in the \
+- THE CUSTOMER SEES EXACTLY ONE BILL, AND ONLY WHEN EVERYTHING IS DECIDED. A \
+message containing Subtotal / Tax / Delivery / Total lines IS a bill. Show one, \
+once, at step 4 below — never earlier, never twice. Before that, if the customer \
+asks what it costs, quote item prices from the menu or cart only ("pizza Rs. 1150 \
+ki hai"); do NOT produce a Subtotal/Tax/Delivery/Total block, and NEVER write \
+Rs. 0 for tax or delivery. A bill with a zero tax or zero delivery line is always \
+wrong — those numbers come from preview_bill and are never zero for these \
+restaurants.
+- The total is not final until BOTH the delivery details AND the payment method \
+are known: cash and online are TAXED at different rates, so the total changes with \
+how the customer pays. Follow this exact order before place_order — do not skip \
+or reorder:
+  1. DELIVERY DETAILS FIRST. The FULL delivery address (house/flat number, area, \
+city) and the NAME of the person receiving the order, asked together in ONE short \
+message. Skip whichever you already have (a saved address, or a name from a \
+previous order).
+  2. PAYMENT METHOD. Check "Payment methods available right now" in the \
 system message. If MORE THAN ONE is listed (e.g. cod, online), ask \
 the customer which one and WAIT for their answer. If only one is listed (usually \
 just cod), use it silently — do not ask.
-  2. Call `preview_bill` with the chosen payment_method (and coupon_code if the \
-customer gave one) to get the exact numbers. NEVER compute subtotal, tax, \
-delivery or total yourself — always take them from preview_bill.
-  3. Read the full order back using those numbers: each item with quantity and \
+  3. Call `preview_bill` ONCE, passing payment_method, delivery_address and \
+contact_name (plus coupon_code if the customer gave one). NEVER compute subtotal, \
+tax, delivery or total yourself — always take them from preview_bill. If it \
+answers that a detail is still missing, ask the customer for exactly that and show \
+NO bill this turn.
+  4. Read the full order back ONCE using those numbers: each item with quantity and \
 price, then Subtotal, Tax, Delivery, Total, and the delivery address. The Total \
 you read back is ALWAYS larger than the food subtotal — it ADDS tax and delivery. \
 Never present the subtotal as the Total, and never state a Total you did not get \
 from preview_bill. Quoting the pre-tax subtotal as the total is a bait-and-switch: \
 the customer confirms one number and is charged a higher one.
-  4. Get an explicit "yes"/"haan".
-  5. Call place_order with the SAME payment_method (and coupon_code). Coupons \
-pass through as coupon_code; never compute discounts yourself.
+  5. Get an explicit "yes"/"haan".
+  6. Call place_order with the SAME payment_method, delivery_address and \
+contact_name (and coupon_code). Coupons pass through as coupon_code; never compute \
+discounts yourself.
 - place_order spends the customer's money — call it ONCE per order. If the customer \
 asks about an order they already placed ("where is my order?"), use get_order_status \
 — NEVER add_to_cart or place_order again. Orders in the system message above are \
@@ -893,21 +914,32 @@ def _quoted_total(text: str | None) -> Decimal | None:
         return None
 
 
-def _readback_total_is_unbacked(reply: str | None, trace: list[dict]) -> bool:
-    """True when a reply quotes an order Total that no preview_bill call this turn
-    produced.
+# A bill component line: one of the labels followed by an Rs figure. The leading
+# \b keeps "total" from matching inside "Subtotal" (the Bug 1 boundary fix), so a
+# "Subtotal: Rs. 1150" line contributes the `subtotal` label and nothing else.
+_BILL_LINE_RE = re.compile(
+    r"\b(subtotal|tax|delivery|discount|total|kul)\b[^0-9\n]{0,20}rs\.?\s*[0-9]",
+    re.IGNORECASE,
+)
 
-    The read-back bait-and-switch family — Bug 1 (bare subtotal read back as the
-    Total) AND the AB-F6DF70 fabricated bill (Rs. 284 tax = 10% on Rs. 2840, plus a
-    made-up Rs. 150 delivery, total ABOVE the subtotal). Rather than guess at the
-    number's magnitude — a proxy the model defeats by fabricating a total above the
-    subtotal — tie the quoted total to ground truth: it MUST equal a preview_bill
-    total from THIS turn's trace. A number the model computed itself has no matching
-    preview and is caught. Requiring a same-turn preview (not a stale
-    context.previewed_bill) also stops an old total from backing a changed cart."""
-    quoted = _quoted_total(reply)
-    if quoted is None:
-        return False
+
+def _looks_like_a_bill(reply: str | None) -> bool:
+    """True when the reply presents a BILL — two or more distinct component lines
+    (Subtotal / Tax / Delivery / Discount / Total), each with an Rs figure.
+
+    Two distinct labels, not one, is what keeps this safe to apply broadly: a lone
+    "total Rs. 580" is how a budget estimate (find_restaurants) and an order-status
+    reply legitimately talk, and neither is a bill. Requiring a second component
+    means only a real bill block trips it — which is exactly the Issue 3 message
+    ("Subtotal Rs. 1150, Tax: Rs. 0, Delivery: Rs. 0, Total: Rs. 1150") the
+    total-only check let through."""
+    labels = {match.group(1).lower() for match in _BILL_LINE_RE.finditer(reply or "")}
+    return len(labels) >= 2
+
+
+def _preview_totals_this_turn(trace: list[dict]) -> list[Decimal]:
+    """Every total a preview_bill call produced in THIS turn's trace."""
+    totals: list[Decimal] = []
     for step in trace:
         if step.get("tool") != "preview_bill":
             continue
@@ -915,11 +947,40 @@ def _readback_total_is_unbacked(reply: str | None, trace: list[dict]) -> bool:
         if not isinstance(result, dict) or result.get("total") is None:
             continue
         try:
-            if abs(quoted - Decimal(str(result["total"]))) <= Decimal("0.01"):
-                return False  # backed by a real preview this turn
+            totals.append(Decimal(str(result["total"])))
         except (ArithmeticError, ValueError, TypeError):
             continue
-    return True  # quotes a Total that no preview_bill this turn produced
+    return totals
+
+
+def _readback_bill_is_unbacked(reply: str | None, trace: list[dict]) -> bool:
+    """True when a reply shows a bill that no preview_bill call this turn produced.
+
+    The read-back bait-and-switch family — Bug 1 (bare subtotal read back as the
+    Total), the AB-F6DF70 fabricated bill (Rs. 284 tax = 10% on Rs. 2840, plus a
+    made-up Rs. 150 delivery, total ABOVE the subtotal), and Issue 3's zero-tax bill
+    invented before the payment method was even chosen. Rather than guess at the
+    number's magnitude — a proxy the model defeats by fabricating a total above the
+    subtotal — tie the bill to ground truth: it MUST come from a preview_bill in
+    THIS turn's trace. Requiring a same-turn preview (not a stale
+    context.previewed_bill) also stops an old total from backing a changed cart.
+
+    Two ways in, because Issue 3 showed a bill can be fabricated without ever
+    quoting a parseable Total line:
+      * the reply quotes a Total  → that number must MATCH a preview this turn;
+      * the reply is bill-SHAPED  → some preview must have run this turn at all.
+    """
+    quoted = _quoted_total(reply)
+    bill_shaped = _looks_like_a_bill(reply)
+    if quoted is None and not bill_shaped:
+        return False  # not presenting a bill
+
+    totals = _preview_totals_this_turn(trace)
+    if not totals:
+        return True  # a bill with no preview behind it at all
+    if quoted is None:
+        return False  # bill-shaped and a real preview backs it
+    return not any(abs(quoted - total) <= Decimal("0.01") for total in totals)
 
 
 # Bilingual uncertainty markers. Their PRESENCE means the model is hedging a weak
@@ -1229,11 +1290,11 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
             # rate like 10% + an invented delivery fee). That number must never reach
             # the customer, so suppress this reply and force preview_bill; the next
             # round produces a correct read-back. Fires once.
-            if not total_corrected_once and _readback_total_is_unbacked(text, trace):
+            if not total_corrected_once and _readback_bill_is_unbacked(text, trace):
                 total_corrected_once = True
                 force_next = True
                 logger.info(
-                    "conversation %s read back a total no preview_bill produced (%r); forcing preview_bill",
+                    "conversation %s showed a bill no preview_bill produced (%r); forcing preview_bill",
                     conversation.id,
                     text[:80],
                 )
@@ -1241,11 +1302,15 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                     {
                         "role": "system",
                         "content": (
-                            "The total you just read back was NOT produced by "
-                            "preview_bill — you cannot compute the bill yourself. Call "
-                            "preview_bill with the customer's payment method now and "
-                            "read back its EXACT figures (subtotal, tax, delivery, "
-                            "total). Never invent a tax rate or delivery fee."
+                            "The bill you just showed was NOT produced by preview_bill "
+                            "— you cannot compute a bill yourself, and you must never "
+                            "show Subtotal/Tax/Delivery/Total lines that did not come "
+                            "from it. Call preview_bill now with the customer's "
+                            "payment method, delivery address and contact name, then "
+                            "read back its EXACT figures. If it tells you a detail is "
+                            "still missing, ask the customer for that instead and show "
+                            "no bill at all this turn. Never invent a tax rate or "
+                            "delivery fee, and never show Rs. 0 for either."
                         ),
                     }
                 )

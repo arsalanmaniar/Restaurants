@@ -35,6 +35,16 @@ def _seed_outbound(db, conversation):
     db.flush()
 
 
+def _preview(db, conversation, **kwargs):
+    """preview_bill carrying the delivery details the Issue 3 one-bill gate requires
+    in an outbound-seeded (real-looking) flow. These tests are about the preview →
+    place_order handshake, not about the delivery gate, so they supply them once here
+    instead of repeating them at every call site."""
+    kwargs.setdefault("delivery_address", "House 1")
+    kwargs.setdefault("contact_name", "Test Customer")
+    return tools.preview_bill(db, conversation, **kwargs)
+
+
 # --------------------------------------------------------------------------- #
 # Pure arithmetic — services/billing.py
 # --------------------------------------------------------------------------- #
@@ -267,7 +277,7 @@ class TestPreviewGuard:
         self._cart(db, conversation, pizza, menu_item)
         _seed_outbound(db, conversation)
 
-        tools.preview_bill(db, conversation, payment_method="cod")
+        _preview(db, conversation, payment_method="cod")
         result = tools.place_order(
             db, conversation, delivery_address="House 1", payment_method="cod",
             contact_name="Test Customer",
@@ -284,7 +294,7 @@ class TestPreviewGuard:
         self._cart(db, conversation, pizza, menu_item)
         _seed_outbound(db, conversation)
 
-        tools.preview_bill(db, conversation, payment_method="cod")
+        _preview(db, conversation, payment_method="cod")
         result = tools.place_order(
             db, conversation, delivery_address="House 1", payment_method="jazzcash"
         )
@@ -296,7 +306,7 @@ class TestPreviewGuard:
     ):
         self._cart(db, conversation, pizza, menu_item)
         _seed_outbound(db, conversation)
-        tools.preview_bill(db, conversation, payment_method="cod")
+        _preview(db, conversation, payment_method="cod")
 
         # Customer adds another pizza — the previewed total is now stale.
         tools.add_to_cart(db, conversation, menu_item_id=menu_item.id, quantity=1)
@@ -311,7 +321,7 @@ class TestPreviewGuard:
     ):
         self._cart(db, conversation, pizza, menu_item)
         _seed_outbound(db, conversation)
-        tools.preview_bill(db, conversation, payment_method="cod")
+        _preview(db, conversation, payment_method="cod")
         tools.place_order(
             db, conversation, delivery_address="House 1", payment_method="cod",
             contact_name="Test Customer",
@@ -341,3 +351,92 @@ class TestPreviewGuard:
         assert result["error"] == "unavailable_payment_method"
         assert "total" not in result
         assert "previewed_bill" not in (cart_with_pizza.context or {})
+
+
+class TestOneBillGate:
+    """Issue 3: the customer must see ONE bill, and only once EVERYTHING is decided.
+    The reported conversation showed two — a fabricated Rs. 0-tax one before the
+    payment method was chosen, then the real one before the address was collected.
+
+    The delivery details change no number here (delivery fee is a flat per-restaurant
+    charge); this gate is purely about ORDER OF EVENTS, made deterministic because
+    prompt-only sequencing is what failed in AB-F6DF70."""
+
+    def test_refuses_to_bill_before_an_address_is_known(self, db, cart_with_pizza):
+        _seed_outbound(db, cart_with_pizza)
+        result = tools.preview_bill(db, cart_with_pizza, payment_method="cod")
+        assert result["error"] == "missing_address"
+        assert "total" not in result, "no bill may be produced before the address"
+        assert "previewed_bill" not in (cart_with_pizza.context or {})
+
+    def test_refuses_to_bill_before_a_contact_name_is_known(self, db, cart_with_pizza):
+        _seed_outbound(db, cart_with_pizza)
+        result = tools.preview_bill(
+            db, cart_with_pizza, payment_method="cod", delivery_address="House 1, Lahore",
+        )
+        assert result["error"] == "missing_contact_name"
+        assert "total" not in result
+
+    def test_bills_once_everything_is_known(self, db, cart_with_pizza):
+        _seed_outbound(db, cart_with_pizza)
+        result = tools.preview_bill(
+            db, cart_with_pizza, payment_method="cod",
+            delivery_address="House 1, Lahore", contact_name="Ayesha",
+        )
+        assert "error" not in result, result
+        assert result["total"] is not None
+        # Echoed back so the read-back's Address/name lines come from ground truth.
+        assert result["delivery_address"] == "House 1, Lahore"
+        assert result["contact_name"] == "Ayesha"
+
+    def test_a_saved_default_address_satisfies_the_gate(self, db, cart_with_pizza):
+        """A returning customer is never re-asked for an address they already gave."""
+        from app.models import CustomerAddress
+
+        _seed_outbound(db, cart_with_pizza)
+        db.add(CustomerAddress(
+            customer_id=cart_with_pizza.customer_id,
+            address_text="House 9, Gulberg, Lahore",
+            is_default=True,
+        ))
+        cart_with_pizza.customer.name = "Bilal"
+        db.flush()
+
+        result = tools.preview_bill(db, cart_with_pizza, payment_method="cod")
+        assert "error" not in result, result
+        assert result["delivery_address"] == "House 9, Gulberg, Lahore"
+
+    def test_a_shared_pin_satisfies_the_gate_and_is_not_consumed(
+        self, db, cart_with_pizza,
+    ):
+        """The subtle one: place_order CONSUMES the pin, so if preview_bill consumed it
+        too the coordinates would be gone by placement and the order would lose them."""
+        _seed_outbound(db, cart_with_pizza)
+        cart_with_pizza.context = {
+            **(cart_with_pizza.context or {}),
+            "delivery_location": {"lat": 24.8607, "lng": 67.0011},
+        }
+        cart_with_pizza.customer.name = "Bilal"
+        db.flush()
+
+        result = tools.preview_bill(db, cart_with_pizza, payment_method="cod")
+        assert "error" not in result, result
+        assert "maps.google.com" in result["delivery_address"]
+        assert cart_with_pizza.context.get("delivery_location") is not None, (
+            "preview_bill must PEEK at the pin, never consume it"
+        )
+
+        # And placement still attaches the coordinates.
+        placed = tools.place_order(
+            db, cart_with_pizza, payment_method="cod", contact_name="Bilal",
+        )
+        order = db.scalar(select(Order).where(Order.order_number == placed["order_number"]))
+        assert order.delivery_lat == 24.8607
+        assert order.delivery_lng == 67.0011
+
+    def test_direct_tool_call_without_an_outbound_is_exempt(self, db, cart_with_pizza):
+        """Same escape hatch as every other guard: a seed/test caller that never drives
+        a conversation is unaffected."""
+        result = tools.preview_bill(db, cart_with_pizza, payment_method="cod")
+        assert "error" not in result, result
+        assert result["total"] is not None

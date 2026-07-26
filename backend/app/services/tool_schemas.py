@@ -259,13 +259,15 @@ TOOL_SCHEMAS = [
             "description": (
                 "Get the exact bill for the current cart BEFORE placing the order: "
                 "subtotal, tax, delivery fee, and total. READ ONLY — it places "
-                "nothing. The tax rate depends on how the customer pays (cash is "
-                "taxed higher than online), so call this ONLY AFTER the customer "
-                "has chosen a payment method, passing that method. Read the "
-                "returned numbers back to the customer as the order summary, then "
-                "get their confirmation, then call place_order with the SAME "
-                "payment method. Never compute subtotal/tax/total yourself — always "
-                "use the numbers this returns."
+                "nothing. Call this exactly ONCE per order, and only after "
+                "EVERYTHING is settled: the items, the delivery address, the "
+                "receiving person's name, AND the payment method (cash is taxed "
+                "higher than online, so the total is not final until the method is "
+                "known). Pass all four. Its numbers are the ONLY bill the customer "
+                "may ever be shown — read them back once, get confirmation, then "
+                "call place_order with the SAME arguments. Never compute "
+                "subtotal/tax/total yourself, and never show a Subtotal/Tax/"
+                "Delivery/Total message before calling this."
             ),
             "parameters": {
                 "type": "object",
@@ -278,6 +280,23 @@ TOOL_SCHEMAS = [
                             "as available in the system message. Use 'online' for "
                             "online payment. Determines the tax rate (cod is taxed "
                             "higher than online). Do not omit it and do not guess."
+                        ),
+                    },
+                    "delivery_address": {
+                        "type": "string",
+                        "description": (
+                            "The FULL delivery address the customer gave (house/flat "
+                            "number, area, city). Required before any bill can be "
+                            "shown. Omit only if the customer already has a saved "
+                            "address or shared a location pin."
+                        ),
+                    },
+                    "contact_name": {
+                        "type": "string",
+                        "description": (
+                            "Name of the person receiving the order. Required before "
+                            "any bill can be shown, unless already known from a "
+                            "previous order."
                         ),
                     },
                     "coupon_code": {

@@ -43,7 +43,13 @@ class TestContactNameRequiredInRealFlow:
 
     def _ready(self, db, conversation):
         _seed_payment_ack(db, conversation)
-        tools.preview_bill(db, conversation, payment_method="cod")  # pass the Bug 1 guard
+        # Pass the Bug 1 preview guard. The Issue 3 one-bill gate needs the delivery
+        # details here too — this helper's callers are testing what place_order does
+        # with the NAME, so the preview is given both up front.
+        tools.preview_bill(
+            db, conversation, payment_method="cod",
+            delivery_address="Ramchorline Karachi", contact_name="Ayesha",
+        )
 
     def test_real_flow_without_a_name_is_refused_and_places_nothing(
         self, db, cart_with_pizza,

@@ -142,7 +142,11 @@ class TestReplayRegressions:
             "haan confirm, cash on delivery",
             [
                 _completion(_msg(content=understated)),
-                _completion(_msg(tool_calls=[_tc("p", "preview_bill", {"payment_method": "cod"})])),
+                _completion(_msg(tool_calls=[_tc("p", "preview_bill", {
+                    "payment_method": "cod",
+                    "delivery_address": "House 1, Lahore",
+                    "contact_name": "Test Customer",
+                })])),
                 _completion(_msg(content=corrected)),
             ],
         )
@@ -240,7 +244,11 @@ class TestReplayRegressions:
         readback = replay.turn(
             "online payment",
             [
-                _completion(_msg(tool_calls=[_tc("p", "preview_bill", {"payment_method": "online"})])),
+                _completion(_msg(tool_calls=[_tc("p", "preview_bill", {
+                    "payment_method": "online",
+                    "delivery_address": "House 1, Lahore",
+                    "contact_name": "Test Customer",
+                })])),
                 _completion(_msg(content=(
                     "Aapka order:\n1x Chicken Tikka Pizza\n"
                     "Subtotal: Rs. 1150\nTax: Rs. 92.00\nDelivery: Rs. 100.00\n"
@@ -276,6 +284,74 @@ class TestReplayRegressions:
         assert order.tax_rate == Decimal("8.00")
         assert order.total_amount == Decimal("1342.00")
         assert order.status == OrderStatus.AWAITING_PAYMENT  # not confirmed until paid
+
+    def test_7_only_one_bill_is_ever_shown_and_only_when_everything_is_known(
+        self, replay, pizza, menu_item,
+    ):
+        """Issue 3. The customer was shown TWO bill-shaped messages for one order:
+        first a fabricated "Subtotal 1150 / Tax 0 / Delivery 0 / Total 1150" before the
+        payment method was even chosen, then the real Rs. 1342 one before the address
+        had been collected. They must see exactly ONE bill, after items + address +
+        payment method are all settled."""
+        # Turn 1 — build the cart. The model tries to bill immediately, with Rs. 0 tax
+        # and Rs. 0 delivery, having called no preview_bill. That must never be sent.
+        premature = (
+            "Aapka order:\n1x Chicken Tikka Pizza\n"
+            "Subtotal Rs. 1150\nTax: Rs. 0\nDelivery: Rs. 0\nTotal: Rs. 1150\n"
+            "Payment kis se karna hai — cash on delivery ya online payment?"
+        )
+        asks_details = (
+            "Pizza cart mein add kar di. Delivery ke liye poora address aur "
+            "receive karne wale ka naam bata dein — aur payment cash on delivery "
+            "ya online payment?"
+        )
+        first = replay.turn(
+            "ek chicken tikka pizza order karni hai",
+            [
+                _completion(_msg(tool_calls=[
+                    _tc("t1", "get_menu", {"restaurant_id": pizza.id}),
+                    _tc("t2", "add_to_cart", {"menu_item_id": menu_item.id, "quantity": 1}),
+                ])),
+                _completion(_msg(content=premature)),
+                # Guard forces preview_bill; with no address yet it refuses, so the
+                # model asks for the delivery details instead of billing.
+                _completion(_msg(tool_calls=[
+                    _tc("p1", "preview_bill", {"payment_method": "cod"}),
+                ])),
+                _completion(_msg(content=asks_details)),
+            ],
+        )
+        assert first == asks_details
+        assert "Tax: Rs. 0" not in first, "a fabricated zero-tax bill must never be sent"
+        assert not agent._looks_like_a_bill(first), (
+            "no bill may be shown before address + payment method are known"
+        )
+
+        # Turn 2 — customer gives everything; NOW one bill is legitimate.
+        the_bill = (
+            "Aapka order:\n1x Chicken Tikka Pizza\n"
+            "Subtotal: Rs. 1150\nTax: Rs. 92.00\nDelivery: Rs. 100.00\n"
+            "Total: Rs. 1342.00\nAddress: House 1, Lahore\nConfirm karein?"
+        )
+        second = replay.turn(
+            "House 1, Lahore — naam Ayesha, online payment",
+            [
+                _completion(_msg(tool_calls=[_tc("p2", "preview_bill", {
+                    "payment_method": "online",
+                    "delivery_address": "House 1, Lahore",
+                    "contact_name": "Ayesha",
+                })])),
+                _completion(_msg(content=the_bill)),
+            ],
+        )
+
+        assert second == the_bill
+        assert agent._quoted_total(second) == Decimal("1342.00")
+
+        # The whole point: across the entire conversation, exactly ONE bill was sent.
+        bills = [text for text in replay.sent if agent._looks_like_a_bill(text)]
+        assert len(bills) == 1, f"expected exactly one bill, got {len(bills)}: {bills}"
+        assert bills[0] == the_bill
 
     def test_6_biryani_shortlist_is_not_padded_with_a_non_matching_restaurant(
         self, replay,

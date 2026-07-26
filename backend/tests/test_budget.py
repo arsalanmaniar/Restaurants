@@ -320,7 +320,7 @@ class TestFindRestaurantsBudgetEdgeCases:
         assert "error" not in add
         # Real flow previews the taxed bill before placing (Bug 1 guard) and
         # collects a delivery-contact name (Issue 3 guard).
-        tools.preview_bill(db, conv, payment_method="cod")
+        tools.preview_bill(db, conv, payment_method="cod", contact_name="Test Customer")
         placed = tools.place_order(db, conv, payment_method="cod", contact_name="Test Customer")
         assert "error" not in placed
         assert placed["order_number"].startswith("AB-")
