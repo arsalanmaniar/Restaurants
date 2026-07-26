@@ -1000,6 +1000,83 @@ def _discovery_overclaim(
     return any(name and name.lower() in lowered for name in names)
 
 
+def _names_offered_this_turn(
+    db: Session, conversation: Conversation, trace: list[dict]
+) -> list[str]:
+    """Every restaurant name the model is entitled to put in front of the customer
+    on this turn.
+
+    A name qualifies if a tool THIS TURN actually produced it, or if it is the
+    restaurant the conversation is already scoped to:
+
+      * any `restaurants[].name` from any find_restaurants result (more than one
+        search in a turn is legitimate, so all of them count);
+      * the selection-path `restaurant.name` — that shape returns a single
+        `restaurant` key and no `restaurants` list (see tools.find_restaurants);
+      * any `restaurant.name` from a get_menu result — if the model pulled the
+        menu, it has grounds to talk about that restaurant;
+      * the active restaurant, so "Pizza Junction mein biryani nahi hai, lekin
+        KBH mein hai" stays a valid answer (same carve-out _discovery_contradiction
+        makes).
+    """
+    names: list[str] = []
+
+    def _add(value) -> None:
+        if isinstance(value, str) and value and value not in names:
+            names.append(value)
+
+    for step in trace:
+        result = step.get("result")
+        if not isinstance(result, dict):
+            continue
+        if step.get("tool") == "find_restaurants":
+            for entry in result.get("restaurants") or []:
+                if isinstance(entry, dict):
+                    _add(entry.get("name"))
+        if step.get("tool") in ("find_restaurants", "get_menu"):
+            restaurant = result.get("restaurant")
+            if isinstance(restaurant, dict):
+                _add(restaurant.get("name"))
+
+    if conversation.active_restaurant_id is not None:
+        active = db.get(Restaurant, conversation.active_restaurant_id)
+        if active is not None:
+            _add(active.name)
+
+    return names
+
+
+def _discovery_padding(
+    db: Session, conversation: Conversation, reply: str | None, trace: list[dict]
+) -> bool:
+    """Issue 2: a GOOD discovery result padded with a restaurant that was not in it.
+
+    "Biryani hai?" returned only Karachi Biryani House — Pizza Junction matches
+    'biryani' on no field and no menu item — yet the reply offered both, and Pizza
+    Junction was later confirmed to have no biryani. The anchored-matching fix works
+    (the tool never returned it); what was missing is a check that the REPLY only
+    names what the search actually found.
+
+    Deliberately scoped to a non-empty result: a zero-match belongs to
+    _discovery_contradiction and a description-only match to _discovery_overclaim,
+    so the three guards partition the space instead of double-firing.
+
+    Allowed names are masked out of the reply BEFORE scanning for absent ones —
+    otherwise an allowed "Pizza Junction 2" would make the absent "Pizza Junction"
+    match as a substring of it.
+    """
+    if not reply:
+        return False
+    result = _latest_find_restaurants_result(trace)
+    if not result or not result.get("restaurants"):
+        return False
+
+    masked = reply.lower()
+    for name in _names_offered_this_turn(db, conversation, trace):
+        masked = masked.replace(name.lower(), " ")
+    return any(name.lower() in masked for name in _active_restaurant_names(db))
+
+
 def _leaks_tool_call(text: str | None) -> bool:
     """True if the model printed its tool call as prose instead of calling it.
 
@@ -1202,6 +1279,38 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                             "description-only (weak / unconfirmed), do NOT claim the "
                             "restaurant serves it — offer it as a possibility and call "
                             "get_menu to check first. Rewrite the reply accordingly."
+                        ),
+                    }
+                )
+                continue
+
+            # Issue 2 — discovery padding. The search returned a real, non-empty
+            # shortlist and the model added a restaurant that was not in it ("biryani"
+            # → Karachi Biryani House, reply offered Pizza Junction too, which serves
+            # no biryani). Shares discovery_corrected_once: at most one discovery
+            # honesty correction per turn. No forced tool — the honest fix is to drop
+            # the invented name, and get_menu stays a free choice if the model wants
+            # to earn the right to talk about another restaurant.
+            if not discovery_corrected_once and _discovery_padding(
+                db, conversation, text, trace
+            ):
+                discovery_corrected_once = True
+                logger.info(
+                    "conversation %s named a restaurant the search did not return (%r); regenerating",
+                    conversation.id,
+                    text[:80],
+                )
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Your draft names a restaurant that was NOT in the search "
+                            "result. Name ONLY the restaurants the search actually "
+                            "returned — do not add others from earlier in the chat or "
+                            "from memory. If you want to say what a different "
+                            "restaurant does or does not serve, call get_menu for it "
+                            "first; never assert that without checking. Rewrite the "
+                            "reply accordingly."
                         ),
                     }
                 )

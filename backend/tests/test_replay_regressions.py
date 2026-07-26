@@ -276,3 +276,31 @@ class TestReplayRegressions:
         assert order.tax_rate == Decimal("8.00")
         assert order.total_amount == Decimal("1342.00")
         assert order.status == OrderStatus.AWAITING_PAYMENT  # not confirmed until paid
+
+    def test_6_biryani_shortlist_is_not_padded_with_a_non_matching_restaurant(
+        self, replay,
+    ):
+        """Issue 2. "Biryani hai?" matches ONLY Karachi Biryani House — Pizza Junction
+        contains 'biryani' in no field and no menu item. The model padded the shortlist
+        with it anyway, and Pizza Junction was later confirmed to have no biryani. The
+        customer must never be offered it as a biryani option."""
+        padded = (
+            "Biryani serve karne wale restaurants:\n"
+            "1. Karachi Biryani House\n2. Pizza Junction\n\nKaunsa chahenge?"
+        )
+        corrected = "Biryani ke liye Karachi Biryani House hai. Menu dikhaun?"
+        outbound = replay.turn(
+            "Biryani hai?",
+            [
+                _completion(_msg(tool_calls=[
+                    _tc("f", "find_restaurants", {"query": "Biryani hai?"}),
+                ])),
+                _completion(_msg(content=padded)),
+                _completion(_msg(content=corrected)),
+            ],
+        )
+
+        assert outbound == corrected
+        assert "Pizza Junction" not in outbound, (
+            "a biryani shortlist must not name a restaurant that serves no biryani"
+        )

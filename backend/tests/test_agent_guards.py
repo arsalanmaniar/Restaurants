@@ -751,3 +751,133 @@ class TestDiscoveryHonestyGuard:
         reply, _trace = agent.generate_reply(db, conversation)
 
         assert reply == good
+
+
+class TestDiscoveryPaddingGuard:
+    """Issue 2: a GOOD (non-empty, strong) discovery result padded with a restaurant
+    the search never returned. "Biryani hai?" returns only Karachi Biryani House —
+    Pizza Junction matches 'biryani' on no field and no menu item — but the reply
+    offered both, and Pizza Junction has no biryani.
+
+    The zero-match and weak-match cases belong to the two guards above; this one
+    covers only the non-empty result, so the three partition the space."""
+
+    def _found(self, *names):
+        return [{
+            "tool": "find_restaurants",
+            "args": '{"query": "biryani"}',
+            "result": {
+                "query": "biryani",
+                "restaurants": [
+                    {"id": i, "name": n, "match_strength": "strong"}
+                    for i, n in enumerate(names, start=1)
+                ],
+            },
+        }]
+
+    def test_fires_when_reply_adds_a_restaurant_the_search_did_not_return(
+        self, db, conversation,
+    ):
+        """The real Issue 2 transcript."""
+        reply = (
+            "Biryani serve karne wale restaurants:\n"
+            "1. Karachi Biryani House\n2. Pizza Junction\n\nKaunsa chahenge?"
+        )
+        assert agent._discovery_padding(
+            db, conversation, reply, self._found("Karachi Biryani House")
+        ) is True
+
+    def test_not_flagged_when_reply_names_only_what_was_returned(
+        self, db, conversation,
+    ):
+        reply = "Biryani ke liye Karachi Biryani House hai. Menu dikhaun?"
+        assert agent._discovery_padding(
+            db, conversation, reply, self._found("Karachi Biryani House")
+        ) is False
+
+    def test_not_flagged_when_the_extra_name_is_the_active_restaurant(
+        self, db, conversation, pizza,
+    ):
+        """With Pizza Junction active, contrasting it with the search result is the
+        honest answer, not padding — the same carve-out the contradiction guard makes."""
+        conversation.active_restaurant_id = pizza.id
+        reply = "Pizza Junction mein biryani nahi hai, lekin Karachi Biryani House mein hai."
+        assert agent._discovery_padding(
+            db, conversation, reply, self._found("Karachi Biryani House")
+        ) is False
+
+    def test_not_flagged_when_get_menu_was_called_for_the_extra_restaurant(
+        self, db, conversation, pizza,
+    ):
+        """Pulling the menu earns the right to talk about that restaurant."""
+        trace = self._found("Karachi Biryani House") + [{
+            "tool": "get_menu", "args": "{}",
+            "result": {"restaurant": {"id": pizza.id, "name": "Pizza Junction"}},
+        }]
+        reply = "Karachi Biryani House mein biryani hai; Pizza Junction mein nahi."
+        assert agent._discovery_padding(db, conversation, reply, trace) is False
+
+    def test_not_flagged_on_a_zero_match(self, db, conversation):
+        """Delegated to _discovery_contradiction — this guard must not double-fire."""
+        trace = [{
+            "tool": "find_restaurants", "args": '{"query": "burger"}',
+            "result": {"query": "burger", "restaurants": [], "found_anywhere": False},
+        }]
+        reply = "Burger nahi hai.\n1. Karachi Biryani House"
+        assert agent._discovery_padding(db, conversation, reply, trace) is False
+
+    def test_not_flagged_when_no_discovery_ran_this_turn(self, db, conversation):
+        reply = "Karachi Biryani House aur Pizza Junction dono achay hain."
+        assert agent._discovery_padding(db, conversation, reply, []) is False
+
+    def test_selection_path_result_allows_the_selected_restaurant(
+        self, db, conversation,
+    ):
+        """find_restaurants' selection path returns a single `restaurant` key and no
+        `restaurants` list — naming that restaurant must not count as padding."""
+        trace = [{
+            "tool": "find_restaurants", "args": '{"query": "Pizza Junction"}',
+            "result": {
+                "query": "Pizza Junction",
+                "selected_from_shown_list": True,
+                "restaurant": {"id": 1, "name": "Pizza Junction"},
+                "items": [],
+            },
+        }]
+        reply = "Pizza Junction ka menu ye raha."
+        assert agent._discovery_padding(db, conversation, reply, trace) is False
+
+    def test_allowed_name_is_masked_before_scanning_for_absent_ones(
+        self, db, conversation, biryani,
+    ):
+        """Substring trap: an allowed longer name must not leave a shorter absent
+        name matching inside it. Renaming the seeded restaurant makes the returned
+        name a strict superstring of the one that is NOT in the result."""
+        biryani.name = "Karachi Biryani House Deluxe"
+        db.flush()
+        reply = "Sirf Karachi Biryani House Deluxe mein biryani hai."
+        assert agent._discovery_padding(
+            db, conversation, reply, self._found("Karachi Biryani House Deluxe")
+        ) is False
+
+    def test_padded_reply_is_regenerated_end_to_end(
+        self, db, conversation, scripted_model,
+    ):
+        """Through generate_reply: the padded draft never reaches the customer."""
+        bad = (
+            "Biryani serve karne wale restaurants:\n"
+            "1. Karachi Biryani House\n2. Pizza Junction\n\nKaunsa chahenge?"
+        )
+        good = "Biryani ke liye Karachi Biryani House hai. Menu dikhaun?"
+        scripted_model([
+            completion(message(tool_calls=[
+                tool_call("f", "find_restaurants", {"query": "biryani"}),
+            ])),
+            completion(message(content=bad)),
+            completion(message(content=good)),
+        ])
+
+        reply, _trace = agent.generate_reply(db, conversation)
+
+        assert reply == good
+        assert "Pizza Junction" not in reply
