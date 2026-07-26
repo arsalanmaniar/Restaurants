@@ -142,13 +142,18 @@ PLANS = [
     },
 ]
 
-# 0 = Monday … 6 = Sunday. Lunch and dinner as separate periods (a split shift),
-# with a late-night window on Fri/Sat that runs past midnight.
-STANDARD_HOURS = [
-    *[(day, time(12, 0), time(15, 30), False) for day in range(0, 7)],
-    *[(day, time(18, 30), time(23, 30), False) for day in (0, 1, 2, 3, 6)],
-    *[(day, time(18, 30), time(1, 30), True) for day in (4, 5)],  # Fri/Sat till 1:30am
-]
+# 0 = Monday … 6 = Sunday. One wide daily window, 07:00 until 03:30 the next
+# morning (crosses midnight), every day — so every demo restaurant is available
+# across all normal testing hours and only goes dark 03:30–07:00.
+#
+# This was previously a lunch/dinner split shift with a Fri/Sat late-night window.
+# In practice that made demo restaurants silently vanish between shifts and
+# off-hours: a greeting run at 10:45am showed only the restaurants whose hours had
+# been widened via the dashboard and dropped the rest, which read as a "restaurant
+# missing" regression (Wok & Roll). A re-seed must not reintroduce that. The
+# dedicated split-shift / past-midnight / closed-kitchen coverage lives in
+# test_opening_hours.py, which installs its OWN schedule and is unaffected by this.
+STANDARD_HOURS = [(day, time(7, 0), time(3, 30), True) for day in range(7)]
 
 
 def seed() -> None:
