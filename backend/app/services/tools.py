@@ -210,6 +210,9 @@ def list_restaurants(db: Session, conversation: Conversation, cuisine: str | Non
     stmt = select(Restaurant).where(
         Restaurant.status == RestaurantStatus.ACTIVE,
         Restaurant.is_accepting_orders.is_(True),
+        # A restaurant with nothing orderable is a dead end — this is how a stub
+        # with 0 menu rows (Mandi House) reached a live customer's greeting.
+        discovery_service.has_orderable_items(),
     )
     if cuisine:
         stmt = stmt.where(Restaurant.cuisine_type.ilike(f"%{cuisine}%"))
@@ -347,6 +350,10 @@ def _available_cuisines(db: Session) -> list[str]:
         select(Restaurant).where(
             Restaurant.status == RestaurantStatus.ACTIVE,
             Restaurant.is_accepting_orders.is_(True),
+            # Never offer a cuisine as an alternative when nothing behind it can
+            # actually be ordered — that is a second dead end right after the
+            # "we don't have that" we just delivered.
+            discovery_service.has_orderable_items(),
         )
     ).all()
     seen: list[str] = []
@@ -510,6 +517,9 @@ def find_restaurants(
             select(Restaurant).where(
                 Restaurant.status == RestaurantStatus.ACTIVE,
                 Restaurant.is_accepting_orders.is_(True),
+                # Same floor as list_restaurants: a budget question must not
+                # estimate against a restaurant with nothing to sell.
+                discovery_service.has_orderable_items(),
             )
         ).all()
         restaurants = {r.id: r for r in all_active if is_open(r)}

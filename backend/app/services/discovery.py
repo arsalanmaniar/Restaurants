@@ -44,6 +44,34 @@ from app.services.opening_hours import is_open
 
 MAX_MATCHED_ITEMS_PER_RESTAURANT = 5
 
+
+def has_orderable_items():
+    """SQL predicate: this restaurant has at least one AVAILABLE menu item.
+
+    A restaurant with an empty menu — or one whose items are all marked
+    unavailable — cannot be ordered from, so offering it is a dead end that
+    contradicts itself one turn later: discovery names it, then get_menu answers
+    "has no items available right now". That is exactly what happened in
+    production with Mandi House, a stub restaurant carrying 0 menu rows: it was
+    offered to a live customer, who picked it and hit a wall.
+
+    Approval/open status is therefore necessary but NOT sufficient to be
+    orderable — having food is the other half. Applied wherever we choose which
+    restaurants to put in front of a customer.
+
+    Correlated EXISTS, covered by ix_menu_items_restaurant_available on
+    (restaurant_id, is_available), so it costs effectively nothing.
+    """
+    return (
+        select(MenuItem.id)
+        .where(
+            MenuItem.restaurant_id == Restaurant.id,
+            MenuItem.is_available.is_(True),
+        )
+        .exists()
+    )
+
+
 # How a restaurant earned its place in the results.
 #
 #   STRONG — the query hit a menu item NAME, the restaurant NAME, or its
@@ -204,6 +232,11 @@ def _match_terms(
         select(Restaurant, r_strong_match.label("is_strong")).where(
             Restaurant.status == RestaurantStatus.ACTIVE,
             Restaurant.is_accepting_orders.is_(True),
+            # Unlike the menu-item pass above (which joins available items and so
+            # is implicitly safe), this pass matches on name/cuisine/description
+            # alone — without this it would happily return a restaurant with an
+            # empty menu, e.g. a "mandi" query matching "Mandi House" by name.
+            has_orderable_items(),
             or_(r_strong_match, r_desc_match),
         )
     ).all()

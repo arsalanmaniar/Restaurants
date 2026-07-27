@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.core.security import verify_password
 from app.models import (
+    MenuCategory,
     MenuItem,
     OrderStatus,
     PaymentMethod,
@@ -58,6 +59,21 @@ class TestRestaurantApproval:
                     crosses_midnight=False,
                 )
             )
+        # Approval is necessary but NOT sufficient to be orderable: a restaurant
+        # also needs something a customer can actually buy. Without this item the
+        # signup stays hidden after approval — correctly, and that rule has its
+        # own coverage in test_discovery.py::TestMenulessRestaurantsAreNeverOffered.
+        category = MenuCategory(restaurant_id=signup.id, name="Grill", sort_order=0)
+        db.add(category)
+        db.flush()
+        db.add(
+            MenuItem(
+                restaurant_id=signup.id,
+                category_id=category.id,
+                name="Seekh Kebab Platter",
+                price=Decimal("650.00"),
+            )
+        )
         db.flush()
 
         response = client.patch(

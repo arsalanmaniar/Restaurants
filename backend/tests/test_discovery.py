@@ -18,7 +18,9 @@ open-only filtering, ranking wired in from Phase 2, and no leaked internal
 tags in matched_items.
 """
 
-from sqlalchemy import delete
+from decimal import Decimal
+
+from sqlalchemy import delete, select, update
 
 from app.models import MenuItem, RestaurantWorkingHours
 from app.services import discovery as discovery_service
@@ -303,3 +305,120 @@ class TestFindRestaurantsTool:
         assert len(biryani_row["matched_items"]) <= (
             discovery_service.MAX_MATCHED_ITEMS_PER_RESTAURANT
         )
+
+
+# --------------------------------------------------------------------------- #
+# Menu-less restaurants are never offered
+# --------------------------------------------------------------------------- #
+
+
+class TestMenulessRestaurantsAreNeverOffered:
+    """A restaurant you cannot order from must never be put in front of a
+    customer. Production hit this with Mandi House — a stub carrying 0 menu rows
+    that was ACTIVE, accepting orders and open, so it appeared in the greeting.
+    A customer picked it and got "Mandi House mein items available nahi hain",
+    the bot contradicting an offer it had made one turn earlier.
+
+    Approval and opening hours are necessary but NOT sufficient to be orderable;
+    having something to sell is the other half.
+    """
+
+    def _stub(self, db, name="Empty Kitchen", cuisine="Mandi"):
+        """An ACTIVE, accepting, always-open restaurant with NO menu at all."""
+        from datetime import time
+
+        from app.models import Restaurant, RestaurantStatus, RestaurantWorkingHours
+
+        restaurant = Restaurant(
+            name=name,
+            phone="923004440077",
+            cuisine_type=cuisine,
+            description=f"Best {cuisine} in town.",
+            status=RestaurantStatus.ACTIVE,
+            commission_rate=Decimal("15.00"),
+            is_accepting_orders=True,
+        )
+        db.add(restaurant)
+        db.flush()
+        # The autouse always_open fixture ran before this row existed, so give it
+        # hours explicitly — otherwise it would be filtered as CLOSED and the test
+        # would pass for the wrong reason.
+        for day_of_week in range(7):
+            db.add(RestaurantWorkingHours(
+                restaurant_id=restaurant.id, day_of_week=day_of_week,
+                opens_at=time(0, 0), closes_at=time(23, 59, 59), crosses_midnight=False,
+            ))
+        db.flush()
+        return restaurant
+
+    def test_it_really_is_open_and_active(self, db):
+        """Guard the guard: prove the stub is excluded for having no MENU, not
+        because it is closed or inactive."""
+        from app.services.opening_hours import is_open
+
+        stub = self._stub(db)
+        assert is_open(stub) is True
+        assert stub.is_accepting_orders is True
+
+    def test_excluded_from_list_restaurants(self, db, conversation):
+        stub = self._stub(db)
+        names = [r["name"] for r in tools.list_restaurants(db, conversation)["restaurants"]]
+        assert stub.name not in names
+        assert "Pizza Junction" in names, "restaurants WITH a menu must be unaffected"
+
+    def test_excluded_from_discovery_matched_by_name(self, db, conversation):
+        """The restaurant-level pass matches name/cuisine/description and ignores
+        the menu — this is the path that would surface an empty restaurant."""
+        stub = self._stub(db, name="Mandi Palace", cuisine="Mandi")
+        result = tools.find_restaurants(db, conversation, query="Mandi Palace")
+        assert stub.name not in [r["name"] for r in result.get("restaurants", [])]
+
+    def test_excluded_from_discovery_matched_by_cuisine_or_description(
+        self, db, conversation,
+    ):
+        stub = self._stub(db, name="Empty Grill", cuisine="Peri Peri")
+        result = tools.find_restaurants(db, conversation, query="peri peri")
+        assert stub.name not in [r["name"] for r in result.get("restaurants", [])]
+
+    def test_excluded_from_the_budget_only_fallback(self, db, conversation):
+        """"1000 mein kya milega" lists every open restaurant — an empty one must
+        not be estimated against."""
+        stub = self._stub(db)
+        result = tools.find_restaurants(db, conversation, budget=5000)
+        assert stub.name not in [r["name"] for r in result.get("restaurants", [])]
+
+    def test_its_cuisine_is_not_offered_as_an_alternative(self, db, conversation):
+        """A zero-match reply offers available_cuisines. Offering a cuisine with
+        nothing orderable behind it is a second dead end straight after the first."""
+        self._stub(db, name="Empty Kitchen", cuisine="Afghani")
+        assert "Afghani" not in tools._available_cuisines(db)
+
+    def test_a_fully_unavailable_menu_counts_as_no_menu(self, db, conversation, pizza):
+        """Distinct from zero rows: the items exist but every one is switched off,
+        so there is still nothing a customer could order."""
+        db.execute(
+            update(MenuItem)
+            .where(MenuItem.restaurant_id == pizza.id)
+            .values(is_available=False)
+        )
+        db.flush()
+
+        names = [r["name"] for r in tools.list_restaurants(db, conversation)["restaurants"]]
+        assert "Pizza Junction" not in names
+
+    def test_one_available_item_is_enough_to_be_offered(self, db, conversation, pizza):
+        """The floor is exactly one orderable item — not a full menu."""
+        db.execute(
+            update(MenuItem)
+            .where(MenuItem.restaurant_id == pizza.id)
+            .values(is_available=False)
+        )
+        db.flush()
+        first = db.scalars(
+            select(MenuItem).where(MenuItem.restaurant_id == pizza.id).limit(1)
+        ).one()
+        first.is_available = True
+        db.flush()
+
+        names = [r["name"] for r in tools.list_restaurants(db, conversation)["restaurants"]]
+        assert "Pizza Junction" in names
