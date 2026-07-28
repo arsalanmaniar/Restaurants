@@ -33,6 +33,7 @@ from app.models import (
     RestaurantStatus,
 )
 from app.services import conversations as convo
+from app.services import language as language_service
 from app.services import prefilter
 from app.services import tools
 from app.services.payments.registry import available_methods
@@ -224,7 +225,13 @@ they want, which restaurant, which item, whether to confirm, and so on. A reply 
 just states a fact and stops leaves the customer unsure what to say next.
 
 Language — match the customer's, ENTIRELY:
-- If the customer writes English ("Hi", "I want biryani", "Karachi") → reply English.
+- Judge from the WHOLE conversation, not just their latest message. A customer \
+who has been writing Roman Urdu and then types a short "yes", "ok" or an address \
+has NOT switched to English — stay in Roman Urdu.
+- A bare greeting that both languages share ("Hi", "Hello", "Hey") is NOT an \
+English signal on its own: default to ROMAN URDU until they write something \
+clearly English. Most of our customers write Roman Urdu.
+- If the customer writes English ("I want biryani", "Do you have pizza?") → reply English.
 - If the customer writes Roman Urdu ("biryani chahiye", "salaam", "assalamualaikum", \
 "saddar mein deliver karo") → reply Roman Urdu, no English fillers.
 - Mixed message → pick the dominant language (>50% of the words), commit to it fully.
@@ -1221,6 +1228,34 @@ def _ungrounded_restaurant_list(
     return listed >= 2
 
 
+def _customer_language(db: Session, conversation: Conversation) -> str:
+    """The customer's language, read from their recent INBOUND messages."""
+    inbound = [
+        msg.content
+        for msg in convo.recent_history(db, conversation, limit=12)
+        if msg.direction == MessageDirection.INBOUND
+    ]
+    return language_service.customer_language(inbound)
+
+
+def _replies_in_the_wrong_language(
+    db: Session, conversation: Conversation, reply: str | None
+) -> bool:
+    """True when the customer is decisively writing one language and the reply is
+    decisively in the other.
+
+    The prompt has always carried this rule; adherence drifts. Production answered
+    an unambiguous English "How are you" with a Roman Urdu greeting (conv 722),
+    while the same class of opener got English elsewhere (conv 713).
+
+    Both sides must be DECISIVE for this to fire — see services/language.py for
+    why that matters. Short affirmations, addresses and loanword-heavy Roman Urdu
+    all classify as UNKNOWN, so the four correct "Yes" turns in conv 721 are left
+    alone.
+    """
+    return language_service.reply_mismatches(_customer_language(db, conversation), reply)
+
+
 def _leaks_tool_call(text: str | None) -> bool:
     """True if the model printed its tool call as prose instead of calling it.
 
@@ -1291,6 +1326,7 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
     forced_once = False
     total_corrected_once = False
     discovery_corrected_once = False
+    language_corrected_once = False
 
     # Loop detection for read-only tools: the model has been observed calling the
     # same read-only tool 3-5 times in one turn (e.g. list_restaurants returning a
@@ -1494,6 +1530,38 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                             "everything), then answer ONLY from what it returns. If "
                             "it finds nothing, say plainly that the item is not "
                             "available and do not name any restaurant."
+                        ),
+                    }
+                )
+                continue
+
+            # Language mismatch. Runs LAST of the content checks: getting the facts
+            # right matters more than getting the language right, so a reply is only
+            # re-generated for language once it has survived every other guard.
+            # Fires once — worst case is one extra round trip, never a wrong fact.
+            if not language_corrected_once and _replies_in_the_wrong_language(
+                db, conversation, text
+            ):
+                language_corrected_once = True
+                target = _customer_language(db, conversation)
+                logger.info(
+                    "conversation %s replied in the wrong language (customer=%s); regenerating",
+                    conversation.id,
+                    target,
+                )
+                wanted = (
+                    "English" if target == language_service.ENGLISH
+                    else "Roman Urdu (Pakistani Urdu in Latin script)"
+                )
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            f"You replied in the wrong language. This customer is "
+                            f"writing in {wanted}. Rewrite your reply ENTIRELY in "
+                            f"{wanted}, keeping the same facts, numbers and turn "
+                            "shape (numbered lists, 'Rs. 450' prices) exactly as "
+                            "they are. Do not mix the two languages."
                         ),
                     }
                 )
