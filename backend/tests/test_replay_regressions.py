@@ -353,6 +353,60 @@ class TestReplayRegressions:
         assert len(bills) == 1, f"expected exactly one bill, got {len(bills)}: {bills}"
         assert bills[0] == the_bill
 
+    def test_8_a_dish_we_do_not_have_never_produces_an_invented_shortlist(
+        self, replay,
+    ):
+        """conv 715. "Haleem hai?" — nothing in the catalogue matches 'haleem' on any
+        restaurant field or any menu item. The model called NO tool, reused the four
+        restaurants from its own greeting one message earlier, and answered "Here are
+        restaurants serving haleem: 1. Karachi Biryani House 2. Mandi House". The
+        customer picked one and hit a dead end.
+
+        The three older discovery guards are blind to this: each reads a
+        find_restaurants result out of the trace, and the trace was empty."""
+        # Turn 1 — the greeting, so the model has a restaurant list in its history to
+        # (wrongly) reuse on the next turn. This mirrors the real conversation.
+        replay.turn(
+            "Hi",
+            [
+                _completion(_msg(tool_calls=[_tc("l", "list_restaurants", {})])),
+                _completion(_msg(content=(
+                    "AbhiAya mein khush amdeed.\n\nAvailable restaurants:\n"
+                    "1. Karachi Biryani House\n2. Wok & Roll\n3. Pizza Junction\n\n"
+                    "Aap kis restaurant se order karna chahenge?"
+                ))),
+            ],
+        )
+
+        # Turn 2 — the bug: a stall phrase in Roman Urdu, no tool call, invented list.
+        fabricated = (
+            "Haleem ki availability check karta hun.\n\n"
+            "Here are restaurants serving haleem:\n"
+            "1. Karachi Biryani House\n2. Pizza Junction\n\n"
+            "Aap kis restaurant se order karna chahenge?"
+        )
+        honest = (
+            "Haleem available nahi hai. Humare paas Desi, Pizza aur Chinese hai — "
+            "kaunsi try karein?"
+        )
+        outbound = replay.turn(
+            "Haleem hai?",
+            [
+                _completion(_msg(content=fabricated)),
+                _completion(_msg(tool_calls=[
+                    _tc("f", "find_restaurants", {"query": "haleem"}),
+                ])),
+                _completion(_msg(content=honest)),
+            ],
+        )
+
+        assert outbound == honest
+        assert "serving haleem" not in outbound.lower()
+        for name in ("Karachi Biryani House", "Pizza Junction", "Wok & Roll"):
+            assert name not in outbound, (
+                f"a dish we do not stock must not come back as a shortlist naming {name!r}"
+            )
+
     def test_6_biryani_shortlist_is_not_padded_with_a_non_matching_restaurant(
         self, replay,
     ):

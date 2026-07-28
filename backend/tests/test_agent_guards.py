@@ -936,3 +936,156 @@ class TestDiscoveryPaddingGuard:
 
         assert reply == good
         assert "Pizza Junction" not in reply
+
+
+class TestUngroundedRestaurantListGuard:
+    """Issue #1: a numbered restaurant list that NO listing tool produced this turn.
+
+    The gap the other three discovery guards cannot see. Each of them reads a
+    find_restaurants result out of the trace, so a turn with NO tool call at all
+    returns False on their first line — and that is the most dangerous turn, because
+    then the entire claim is invented.
+
+    Production (conv 715): asked "Haleem hai?" the model called nothing, reused the
+    four restaurants from its own greeting, and replied "Here are restaurants serving
+    haleem: 1. Karachi Biryani House 2. Mandi House". Nothing in the catalogue
+    matches 'haleem' at all.
+    """
+
+    FABRICATED = (
+        "Haleem ki availability check karta hun.\n\n"
+        "Here are restaurants serving haleem:\n"
+        "1. Karachi Biryani House\n2. Pizza Junction\n\n"
+        "Aap kis restaurant se order karna chahenge?"
+    )
+
+    def _listing(self, tool="find_restaurants"):
+        return [{"tool": tool, "args": "{}", "result": {"restaurants": [
+            {"id": 1, "name": "Karachi Biryani House"},
+            {"id": 2, "name": "Pizza Junction"},
+        ]}}]
+
+    def test_fires_on_a_list_with_no_tool_call_at_all(self, db, conversation):
+        """The exact production failure."""
+        assert agent._ungrounded_restaurant_list(db, self.FABRICATED, []) is True
+
+    @pytest.mark.parametrize(
+        "tool", ["list_restaurants", "find_restaurants", "search_restaurants_by_item"]
+    )
+    def test_not_flagged_when_a_listing_tool_ran(self, db, conversation, tool):
+        """A real listing happened — the CONTENT guards take over from here."""
+        assert agent._ungrounded_restaurant_list(
+            db, self.FABRICATED, self._listing(tool)
+        ) is False
+
+    def test_fires_when_only_get_menu_ran(self, db, conversation):
+        """conv 715's next turn: get_menu failed on the empty restaurant, and the
+        model reported a 3-restaurant list that also came from memory."""
+        trace = [{"tool": "get_menu", "args": "{}",
+                  "result": {"error": "Mandi House has no items available right now."}}]
+        reply = (
+            "Mandi House mein items available nahi hain.\n\n"
+            "Available restaurants:\n1. Karachi Biryani House\n2. Wok & Roll\n"
+            "3. Pizza Junction"
+        )
+        assert agent._ungrounded_restaurant_list(db, reply, trace) is True
+
+    def test_a_single_numbered_restaurant_is_not_a_list(self, db, conversation):
+        """Threshold is two: one numbered line naming a restaurant is usually a
+        confirmation, not an offer of choices. Precision over recall, deliberately."""
+        reply = "Aapka order confirm hai:\n1. Pizza Junction — Chicken Tikka Pizza"
+        assert agent._ungrounded_restaurant_list(db, reply, []) is False
+
+    def test_numbered_menu_items_are_not_a_restaurant_list(self, db, conversation):
+        """A numbered list of FOOD must not trip the guard."""
+        reply = (
+            "Yeh items available hain:\n"
+            "1. Chicken Biryani — Rs. 450\n2. Beef Biryani — Rs. 550\n"
+            "3. Seekh Kebab — Rs. 520"
+        )
+        assert agent._ungrounded_restaurant_list(db, reply, []) is False
+
+    def test_past_order_enumeration_is_allowed(self, db, conversation):
+        """Order-status talk legitimately names restaurants with no listing tool —
+        suppressing it would break a normal, truthful reply."""
+        reply = (
+            "Aapke recent orders:\n"
+            "1. AB-2992A8 — Wok & Roll — Rs. 962.40\n"
+            "2. AB-909804 — Karachi Biryani House — Rs. 2564.00"
+        )
+        assert agent._ungrounded_restaurant_list(db, reply, []) is False
+
+    def test_get_order_status_this_turn_is_allowed(self, db, conversation):
+        trace = [{"tool": "get_order_status", "args": "{}", "result": {"order_number": "AB-2992A8"}}]
+        reply = "Aapke orders:\n1. Karachi Biryani House\n2. Pizza Junction"
+        assert agent._ungrounded_restaurant_list(db, reply, trace) is False
+
+    def test_empty_reply_is_not_flagged(self, db, conversation):
+        assert agent._ungrounded_restaurant_list(db, None, []) is False
+        assert agent._ungrounded_restaurant_list(db, "", []) is False
+
+    def test_prose_without_a_list_is_the_known_residual_gap(self, db, conversation):
+        """Documents an accepted limitation rather than a bug: a one-sentence
+        fabrication carries no numbered list, so this guard does not see it.
+        Catching it would need affirmation detection, which false-positives on
+        legitimate lines like 'Haan, aapka order Pizza Junction se aa raha hai'."""
+        reply = "Haan, Karachi Biryani House mein haleem hai."
+        assert agent._ungrounded_restaurant_list(db, reply, []) is False
+
+    def test_fabricated_list_is_suppressed_and_a_search_is_forced(
+        self, db, conversation, scripted_model,
+    ):
+        """End to end: the invented list never reaches the customer, the guard forces
+        a real search, and the honest zero-match answer is what gets sent."""
+        honest = (
+            "Haleem available nahi hai. Humare paas Desi, Pizza aur Chinese hai — "
+            "kaunsi try karein?"
+        )
+        scripted_model([
+            completion(message(content=self.FABRICATED)),
+            completion(message(tool_calls=[
+                tool_call("f", "find_restaurants", {"query": "haleem"}),
+            ])),
+            completion(message(content=honest)),
+        ])
+
+        reply, trace = agent.generate_reply(db, conversation)
+
+        assert reply == honest
+        assert any(t["tool"] == "find_restaurants" for t in trace), "a search must be forced"
+        for name in ("Karachi Biryani House", "Pizza Junction", "Wok & Roll"):
+            assert name not in reply
+
+
+class TestRomanUrduStallPatterns:
+    """The stall detector forces a tool call when the model says it will "check" and
+    then calls nothing. The list was English-only, so the bot could stall in the
+    customer's own language and slip past — which is how conv 715 began."""
+
+    def test_the_real_production_stall_is_detected(self):
+        assert agent._is_stall("Haleem ki availability check karta hun.") is True
+
+    @pytest.mark.parametrize("phrase", [
+        "Main check karta hun",
+        "Abhi check karti hun",
+        "Menu dekh kar batata hun",
+        "Pata kar ke batata hun",
+        "Ek minute, dekhta hun",
+        "Thori dair mein batata hun",
+    ])
+    def test_roman_urdu_stalls_are_detected(self, phrase):
+        assert agent._is_stall(phrase) is True
+
+    def test_english_stalls_still_work(self):
+        assert agent._is_stall("Let me check the menu") is True
+        assert agent._is_stall("One moment please") is True
+
+    def test_ordinary_replies_are_not_stalls(self):
+        """The list must not swallow normal conversation."""
+        for ordinary in (
+            "Aapka order Pizza Junction se aayega.",
+            "Yeh items available hain: Chicken Biryani — Rs. 450",
+            "Aapka naam kya hai?",
+            "Order place ho gaya hai.",
+        ):
+            assert agent._is_stall(ordinary) is False

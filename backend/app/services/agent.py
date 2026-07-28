@@ -879,6 +879,30 @@ STALL_PATTERNS = (
     "i'll call",
     "i will call",
     "checking",
+    # Roman Urdu. The list was English-only, and customers here are answered in
+    # Roman Urdu — so the bot could stall in the customer's own language and slip
+    # straight past this guard. That is exactly what happened in production: the
+    # reply opened "Haleem ki availability CHECK KARTA HUN." (none of the English
+    # phrases match; "checking" does not appear in "check karta"), no tool was
+    # forced, and the model went on to invent a restaurant list in the same
+    # message. Same blind spot as FAKE_LINK_REPLACEMENT's English-only wording.
+    "check karta",
+    "check karti",
+    "check kar ke",
+    "check kar leta",
+    "check kar leti",
+    "dekh kar batata",
+    "dekh kar batati",
+    "dekh ke batata",
+    "dekh ke batati",
+    "pata kar ke",
+    "pata karta",
+    "abhi batata",
+    "abhi batati",
+    "ek minute",
+    "aik minute",
+    "thori dair",
+    "thori der",
 )
 
 
@@ -1138,6 +1162,65 @@ def _discovery_padding(
     return any(name.lower() in masked for name in _active_restaurant_names(db))
 
 
+# Tools that legitimately produce a list of restaurants. A numbered restaurant
+# list in a reply must be backed by one of these IN THE SAME TURN.
+_LISTING_TOOLS = ("list_restaurants", "find_restaurants", "search_restaurants_by_item")
+
+# "1. Karachi Biryani House" / "2) Wok & Roll" — the numbered-list shape the prompt
+# mandates for every restaurant list, in either language.
+_NUMBERED_LINE_RE = re.compile(r"^\s*\d+[.)]\s*(.+)$", re.MULTILINE)
+
+# Order numbers are generate_order_number()'s "AB-" + 6 uppercase hex. A reply
+# quoting one is talking about a placed order, not offering a menu of choices.
+_ORDER_NUMBER_RE = re.compile(r"\bAB-[0-9A-F]{6}\b")
+
+
+def _ungrounded_restaurant_list(
+    db: Session, reply: str | None, trace: list[dict]
+) -> bool:
+    """True when a reply presents a numbered list of restaurants that NO listing
+    tool produced this turn.
+
+    The failure the three discovery guards cannot see. Each of them reads a
+    find_restaurants result out of the trace, so when the model calls NO tool at
+    all they every one return False on their first line — and a turn with no tools
+    is the most dangerous kind, because then 100% of the claim is invented.
+
+    Production, conv 715: asked "Haleem hai?" the model called nothing, took the
+    four restaurants from its own greeting a message earlier, and answered "Here
+    are restaurants serving haleem: 1. Karachi Biryani House 2. Mandi House".
+    Nothing in the catalog matches "haleem" at all. The next turn it reported the
+    same list minus one entry, again with only a get_menu call behind it.
+
+    Deliberately structural rather than phrase-based: it keys on the numbered-list
+    SHAPE the prompt already mandates, so it works identically in Roman Urdu and
+    English and needs no vocabulary list to stay correct.
+    """
+    if not reply:
+        return False
+
+    # A listing tool ran — whatever it returned, the content guards
+    # (_discovery_contradiction / _overclaim / _padding) are the ones on duty.
+    if any(step.get("tool") in _LISTING_TOOLS for step in trace):
+        return False
+
+    # Past-order talk legitimately enumerates restaurants ("1. AB-2992A8 from Wok
+    # & Roll") without any listing tool, and must not be suppressed.
+    if _ORDER_NUMBER_RE.search(reply) or _tool_called_this_turn(trace, "get_order_status"):
+        return False
+
+    names = [name.lower() for name in _active_restaurant_names(db)]
+    listed = sum(
+        1
+        for match in _NUMBERED_LINE_RE.finditer(reply)
+        if any(name in match.group(1).lower() for name in names)
+    )
+    # Two, not one: a single numbered line naming a restaurant is usually a
+    # confirmation ("1. Pizza Junction — your order"), whereas two or more is
+    # unambiguously an offer of choices. Precision over recall, on purpose.
+    return listed >= 2
+
+
 def _leaks_tool_call(text: str | None) -> bool:
     """True if the model printed its tool call as prose instead of calling it.
 
@@ -1376,6 +1459,41 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                             "restaurant does or does not serve, call get_menu for it "
                             "first; never assert that without checking. Rewrite the "
                             "reply accordingly."
+                        ),
+                    }
+                )
+                continue
+
+            # Issue #1 — a restaurant list nothing produced. The model answered a
+            # dish question with no tool call at all and invented the shortlist from
+            # the greeting it had sent a message earlier. The three guards above all
+            # read a find_restaurants result out of the trace, so an empty trace is
+            # invisible to them. Force a real search: for the haleem case that ends
+            # in a genuine zero-match, whose _empty_result_note tells the model to
+            # say plainly that we do not have it.
+            if not discovery_corrected_once and _ungrounded_restaurant_list(
+                db, text, trace
+            ):
+                discovery_corrected_once = True
+                force_next = True
+                logger.info(
+                    "conversation %s listed restaurants no tool returned (%r); forcing a search",
+                    conversation.id,
+                    text[:80],
+                )
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "You listed restaurants without calling any tool this "
+                            "turn — that list came from memory, not from our "
+                            "catalogue, so it may be entirely wrong. Never list "
+                            "restaurants you have not just looked up. Call "
+                            "find_restaurants with the dish or cuisine the customer "
+                            "asked about (or list_restaurants if they asked for "
+                            "everything), then answer ONLY from what it returns. If "
+                            "it finds nothing, say plainly that the item is not "
+                            "available and do not name any restaurant."
                         ),
                     }
                 )
