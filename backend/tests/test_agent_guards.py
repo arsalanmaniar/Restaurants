@@ -13,8 +13,38 @@ import pytest
 
 from app.models import OrderStatus, PaymentMethod
 from app.services import agent
+from app.services import grounding
 from app.services import billing
 from app.services import tools
+
+
+# --------------------------------------------------------------------------- #
+# The three narrow guards below were folded into services/grounding.py. Their
+# tests are kept verbatim — each encodes a real production failure — and simply
+# re-pointed at the single auditor entry point through these shims.
+# --------------------------------------------------------------------------- #
+
+
+def _violation(db, conversation, reply, trace):
+    return grounding.audit(db, conversation, reply, trace, check_prices=False)
+
+
+def _bill_unbacked(reply, trace):
+    """Old agent._readback_bill_is_unbacked."""
+    v = grounding._bill_violation(reply or "", trace)
+    return v is not None and v.kind == "unbacked_bill"
+
+
+def _kind(db, conversation, reply, trace):
+    """Old agent._discovery_padding -> True when the auditor reports padding."""
+    v = _violation(db, conversation, reply, trace)
+    return v is not None and v.kind in ("search_padding", "unlisted_offer")
+
+
+def _list_kind(db, conversation, reply, trace):
+    """Old agent._ungrounded_restaurant_list."""
+    v = _violation(db, conversation, reply, trace)
+    return v is not None and v.kind == "unlisted_offer"
 
 
 def _subtotal(conversation):
@@ -387,26 +417,26 @@ class TestReadbackBillGuard:
             "Aapka order:\n1x Chicken Tikka Pizza\n"
             "Subtotal Rs. 1150\nTax: Rs. 0\nDelivery: Rs. 0\nTotal: Rs. 1150"
         )
-        assert agent._looks_like_a_bill(premature) is True
-        assert agent._readback_bill_is_unbacked(premature, trace=[]) is True
+        assert grounding.looks_like_a_bill(premature) is True
+        assert _bill_unbacked(premature, trace=[]) is True
 
     def test_a_lone_total_is_not_bill_shaped(self):
         """The false-positive control. A budget estimate ("total Rs. 580") and an
         order-status reply quote a total with no preview behind them and must keep
         their existing behaviour — only the quoted-total rule may apply to them, not
         the new bill-shape rule."""
-        assert agent._looks_like_a_bill("Ye sab milakar total Rs. 580 ka hai.") is False
-        assert agent._looks_like_a_bill("Order AB-1234 ka total Rs. 1422.50 hai.") is False
+        assert grounding.looks_like_a_bill("Ye sab milakar total Rs. 580 ka hai.") is False
+        assert grounding.looks_like_a_bill("Order AB-1234 ka total Rs. 1422.50 hai.") is False
 
     def test_two_distinct_components_are_bill_shaped(self):
-        assert agent._looks_like_a_bill(
+        assert grounding.looks_like_a_bill(
             "Subtotal: Rs. 1150\nDelivery: Rs. 100"
         ) is True
 
     def test_subtotal_alone_does_not_count_as_a_total_label(self):
         """'total' hides inside 'Subtotal' — without the word boundary a single
         Subtotal line would look like two components and trip the guard."""
-        assert agent._looks_like_a_bill("Subtotal: Rs. 1150") is False
+        assert grounding.looks_like_a_bill("Subtotal: Rs. 1150") is False
 
     def test_bill_shaped_reply_backed_by_a_preview_passes(self):
         """A real read-back is bill-shaped by design; a preview this turn clears it."""
@@ -414,7 +444,7 @@ class TestReadbackBillGuard:
             "Subtotal: Rs. 1150\nTax: Rs. 92.00\nDelivery: Rs. 100.00\n"
             "Total: Rs. 1342.00"
         )
-        assert agent._readback_bill_is_unbacked(
+        assert _bill_unbacked(
             readback, [self._preview_step("1342.00")]
         ) is False
 
@@ -423,14 +453,14 @@ class TestReadbackBillGuard:
         catches it, since there is no number to match."""
         partial = "Subtotal: Rs. 1150\nDelivery: Rs. 100"
         assert agent._quoted_total(partial) is None
-        assert agent._readback_bill_is_unbacked(partial, trace=[]) is True
-        assert agent._readback_bill_is_unbacked(
+        assert _bill_unbacked(partial, trace=[]) is True
+        assert _bill_unbacked(
             partial, [self._preview_step("1342.00")]
         ) is False
 
     def test_flags_a_total_with_no_preview_this_turn(self):
         readback = "Aapka order:\nTotal: Rs. 1150\nConfirm karein?"
-        assert agent._readback_bill_is_unbacked(readback, trace=[]) is True
+        assert _bill_unbacked(readback, trace=[]) is True
 
     def test_flags_a_fabricated_total_even_above_subtotal(self):
         """The AB-F6DF70 case: Tax Rs. 284 (a made-up 10%) + Delivery Rs. 150, Total
@@ -440,7 +470,7 @@ class TestReadbackBillGuard:
             "Subtotal: Rs. 2840\nTax: Rs. 284\nDelivery: Rs. 150\n"
             "Total: Rs. 3274\nConfirm karein?"
         )
-        assert agent._readback_bill_is_unbacked(readback, trace=[]) is True
+        assert _bill_unbacked(readback, trace=[]) is True
 
     def test_passes_a_total_backed_by_a_preview_this_turn(self):
         readback = (
@@ -448,10 +478,10 @@ class TestReadbackBillGuard:
             "Total: Rs. 3346.00\nConfirm karein?"
         )
         trace = [self._preview_step("3346.00")]
-        assert agent._readback_bill_is_unbacked(readback, trace) is False
+        assert _bill_unbacked(readback, trace) is False
 
     def test_ignores_replies_that_quote_no_total(self):
-        assert agent._readback_bill_is_unbacked("Aap ka naam kya hai?", trace=[]) is False
+        assert _bill_unbacked("Aap ka naam kya hai?", trace=[]) is False
 
     def test_quoted_total_binds_the_total_line_not_the_subtotal_line(self):
         """A correct read-back lists both Subtotal and Total. The parser must bind
@@ -524,7 +554,7 @@ class TestReadbackBillGuard:
             f"Delivery: Rs. {bill.delivery_fee}\nTotal: Rs. {bill.total}\nConfirm karein?"
         )
         # Sanity: the bare Rs. 1150, with no preview this turn, is unbacked.
-        assert agent._readback_bill_is_unbacked(understated, trace=[]) is True
+        assert _bill_unbacked(understated, trace=[]) is True
 
         scripted_model(
             [
@@ -838,7 +868,7 @@ class TestDiscoveryPaddingGuard:
             "Biryani serve karne wale restaurants:\n"
             "1. Karachi Biryani House\n2. Pizza Junction\n\nKaunsa chahenge?"
         )
-        assert agent._discovery_padding(
+        assert _kind(
             db, conversation, reply, self._found("Karachi Biryani House")
         ) is True
 
@@ -846,7 +876,7 @@ class TestDiscoveryPaddingGuard:
         self, db, conversation,
     ):
         reply = "Biryani ke liye Karachi Biryani House hai. Menu dikhaun?"
-        assert agent._discovery_padding(
+        assert _kind(
             db, conversation, reply, self._found("Karachi Biryani House")
         ) is False
 
@@ -857,7 +887,7 @@ class TestDiscoveryPaddingGuard:
         honest answer, not padding — the same carve-out the contradiction guard makes."""
         conversation.active_restaurant_id = pizza.id
         reply = "Pizza Junction mein biryani nahi hai, lekin Karachi Biryani House mein hai."
-        assert agent._discovery_padding(
+        assert _kind(
             db, conversation, reply, self._found("Karachi Biryani House")
         ) is False
 
@@ -870,7 +900,7 @@ class TestDiscoveryPaddingGuard:
             "result": {"restaurant": {"id": pizza.id, "name": "Pizza Junction"}},
         }]
         reply = "Karachi Biryani House mein biryani hai; Pizza Junction mein nahi."
-        assert agent._discovery_padding(db, conversation, reply, trace) is False
+        assert _kind(db, conversation, reply, trace) is False
 
     def test_not_flagged_on_a_zero_match(self, db, conversation):
         """Delegated to _discovery_contradiction — this guard must not double-fire."""
@@ -879,11 +909,11 @@ class TestDiscoveryPaddingGuard:
             "result": {"query": "burger", "restaurants": [], "found_anywhere": False},
         }]
         reply = "Burger nahi hai.\n1. Karachi Biryani House"
-        assert agent._discovery_padding(db, conversation, reply, trace) is False
+        assert _kind(db, conversation, reply, trace) is False
 
     def test_not_flagged_when_no_discovery_ran_this_turn(self, db, conversation):
         reply = "Karachi Biryani House aur Pizza Junction dono achay hain."
-        assert agent._discovery_padding(db, conversation, reply, []) is False
+        assert _kind(db, conversation, reply, []) is False
 
     def test_selection_path_result_allows_the_selected_restaurant(
         self, db, conversation,
@@ -900,7 +930,7 @@ class TestDiscoveryPaddingGuard:
             },
         }]
         reply = "Pizza Junction ka menu ye raha."
-        assert agent._discovery_padding(db, conversation, reply, trace) is False
+        assert _kind(db, conversation, reply, trace) is False
 
     def test_allowed_name_is_masked_before_scanning_for_absent_ones(
         self, db, conversation, biryani,
@@ -911,7 +941,7 @@ class TestDiscoveryPaddingGuard:
         biryani.name = "Karachi Biryani House Deluxe"
         db.flush()
         reply = "Sirf Karachi Biryani House Deluxe mein biryani hai."
-        assert agent._discovery_padding(
+        assert _kind(
             db, conversation, reply, self._found("Karachi Biryani House Deluxe")
         ) is False
 
@@ -967,15 +997,15 @@ class TestUngroundedRestaurantListGuard:
 
     def test_fires_on_a_list_with_no_tool_call_at_all(self, db, conversation):
         """The exact production failure."""
-        assert agent._ungrounded_restaurant_list(db, self.FABRICATED, []) is True
+        assert _list_kind(db, conversation, self.FABRICATED, []) is True
 
     @pytest.mark.parametrize(
         "tool", ["list_restaurants", "find_restaurants", "search_restaurants_by_item"]
     )
     def test_not_flagged_when_a_listing_tool_ran(self, db, conversation, tool):
         """A real listing happened — the CONTENT guards take over from here."""
-        assert agent._ungrounded_restaurant_list(
-            db, self.FABRICATED, self._listing(tool)
+        assert _list_kind(
+            db, conversation, self.FABRICATED, self._listing(tool)
         ) is False
 
     def test_fires_when_only_get_menu_ran(self, db, conversation):
@@ -988,13 +1018,13 @@ class TestUngroundedRestaurantListGuard:
             "Available restaurants:\n1. Karachi Biryani House\n2. Wok & Roll\n"
             "3. Pizza Junction"
         )
-        assert agent._ungrounded_restaurant_list(db, reply, trace) is True
+        assert _list_kind(db, conversation, reply, trace) is True
 
     def test_a_single_numbered_restaurant_is_not_a_list(self, db, conversation):
         """Threshold is two: one numbered line naming a restaurant is usually a
         confirmation, not an offer of choices. Precision over recall, deliberately."""
         reply = "Aapka order confirm hai:\n1. Pizza Junction — Chicken Tikka Pizza"
-        assert agent._ungrounded_restaurant_list(db, reply, []) is False
+        assert _list_kind(db, conversation, reply, []) is False
 
     def test_numbered_menu_items_are_not_a_restaurant_list(self, db, conversation):
         """A numbered list of FOOD must not trip the guard."""
@@ -1003,7 +1033,7 @@ class TestUngroundedRestaurantListGuard:
             "1. Chicken Biryani — Rs. 450\n2. Beef Biryani — Rs. 550\n"
             "3. Seekh Kebab — Rs. 520"
         )
-        assert agent._ungrounded_restaurant_list(db, reply, []) is False
+        assert _list_kind(db, conversation, reply, []) is False
 
     def test_past_order_enumeration_is_allowed(self, db, conversation):
         """Order-status talk legitimately names restaurants with no listing tool —
@@ -1013,16 +1043,16 @@ class TestUngroundedRestaurantListGuard:
             "1. AB-2992A8 — Wok & Roll — Rs. 962.40\n"
             "2. AB-909804 — Karachi Biryani House — Rs. 2564.00"
         )
-        assert agent._ungrounded_restaurant_list(db, reply, []) is False
+        assert _list_kind(db, conversation, reply, []) is False
 
     def test_get_order_status_this_turn_is_allowed(self, db, conversation):
         trace = [{"tool": "get_order_status", "args": "{}", "result": {"order_number": "AB-2992A8"}}]
         reply = "Aapke orders:\n1. Karachi Biryani House\n2. Pizza Junction"
-        assert agent._ungrounded_restaurant_list(db, reply, trace) is False
+        assert _list_kind(db, conversation, reply, trace) is False
 
     def test_empty_reply_is_not_flagged(self, db, conversation):
-        assert agent._ungrounded_restaurant_list(db, None, []) is False
-        assert agent._ungrounded_restaurant_list(db, "", []) is False
+        assert _list_kind(db, conversation, None, []) is False
+        assert _list_kind(db, conversation, "", []) is False
 
     def test_prose_without_a_list_is_the_known_residual_gap(self, db, conversation):
         """Documents an accepted limitation rather than a bug: a one-sentence
@@ -1030,7 +1060,7 @@ class TestUngroundedRestaurantListGuard:
         Catching it would need affirmation detection, which false-positives on
         legitimate lines like 'Haan, aapka order Pizza Junction se aa raha hai'."""
         reply = "Haan, Karachi Biryani House mein haleem hai."
-        assert agent._ungrounded_restaurant_list(db, reply, []) is False
+        assert _list_kind(db, conversation, reply, []) is False
 
     def test_fabricated_list_is_suppressed_and_a_search_is_forced(
         self, db, conversation, scripted_model,

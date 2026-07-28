@@ -33,6 +33,7 @@ from app.models import (
     RestaurantStatus,
 )
 from app.services import conversations as convo
+from app.services import grounding
 from app.services import language as language_service
 from app.services import prefilter
 from app.services import tools
@@ -931,6 +932,11 @@ _TOTAL_QUOTE_RE = re.compile(
 )
 
 
+def _looks_like_a_bill(text: str | None) -> bool:
+    """Delegates to the grounding auditor — kept so callers/tests have one name."""
+    return grounding.looks_like_a_bill(text)
+
+
 def _quoted_total(text: str | None) -> Decimal | None:
     """The Rs figure the reply presents as the order Total, or None if it isn't
     quoting one."""
@@ -944,74 +950,6 @@ def _quoted_total(text: str | None) -> Decimal | None:
     except (ArithmeticError, ValueError):
         return None
 
-
-# A bill component line: one of the labels followed by an Rs figure. The leading
-# \b keeps "total" from matching inside "Subtotal" (the Bug 1 boundary fix), so a
-# "Subtotal: Rs. 1150" line contributes the `subtotal` label and nothing else.
-_BILL_LINE_RE = re.compile(
-    r"\b(subtotal|tax|delivery|discount|total|kul)\b[^0-9\n]{0,20}rs\.?\s*[0-9]",
-    re.IGNORECASE,
-)
-
-
-def _looks_like_a_bill(reply: str | None) -> bool:
-    """True when the reply presents a BILL — two or more distinct component lines
-    (Subtotal / Tax / Delivery / Discount / Total), each with an Rs figure.
-
-    Two distinct labels, not one, is what keeps this safe to apply broadly: a lone
-    "total Rs. 580" is how a budget estimate (find_restaurants) and an order-status
-    reply legitimately talk, and neither is a bill. Requiring a second component
-    means only a real bill block trips it — which is exactly the Issue 3 message
-    ("Subtotal Rs. 1150, Tax: Rs. 0, Delivery: Rs. 0, Total: Rs. 1150") the
-    total-only check let through."""
-    labels = {match.group(1).lower() for match in _BILL_LINE_RE.finditer(reply or "")}
-    return len(labels) >= 2
-
-
-def _preview_totals_this_turn(trace: list[dict]) -> list[Decimal]:
-    """Every total a preview_bill call produced in THIS turn's trace."""
-    totals: list[Decimal] = []
-    for step in trace:
-        if step.get("tool") != "preview_bill":
-            continue
-        result = step.get("result")
-        if not isinstance(result, dict) or result.get("total") is None:
-            continue
-        try:
-            totals.append(Decimal(str(result["total"])))
-        except (ArithmeticError, ValueError, TypeError):
-            continue
-    return totals
-
-
-def _readback_bill_is_unbacked(reply: str | None, trace: list[dict]) -> bool:
-    """True when a reply shows a bill that no preview_bill call this turn produced.
-
-    The read-back bait-and-switch family — Bug 1 (bare subtotal read back as the
-    Total), the AB-F6DF70 fabricated bill (Rs. 284 tax = 10% on Rs. 2840, plus a
-    made-up Rs. 150 delivery, total ABOVE the subtotal), and Issue 3's zero-tax bill
-    invented before the payment method was even chosen. Rather than guess at the
-    number's magnitude — a proxy the model defeats by fabricating a total above the
-    subtotal — tie the bill to ground truth: it MUST come from a preview_bill in
-    THIS turn's trace. Requiring a same-turn preview (not a stale
-    context.previewed_bill) also stops an old total from backing a changed cart.
-
-    Two ways in, because Issue 3 showed a bill can be fabricated without ever
-    quoting a parseable Total line:
-      * the reply quotes a Total  → that number must MATCH a preview this turn;
-      * the reply is bill-SHAPED  → some preview must have run this turn at all.
-    """
-    quoted = _quoted_total(reply)
-    bill_shaped = _looks_like_a_bill(reply)
-    if quoted is None and not bill_shaped:
-        return False  # not presenting a bill
-
-    totals = _preview_totals_this_turn(trace)
-    if not totals:
-        return True  # a bill with no preview behind it at all
-    if quoted is None:
-        return False  # bill-shaped and a real preview backs it
-    return not any(abs(quoted - total) <= Decimal("0.01") for total in totals)
 
 
 # Bilingual uncertainty markers. Their PRESENCE means the model is hedging a weak
@@ -1091,141 +1029,6 @@ def _discovery_overclaim(
     names = [r.get("name", "") for r in result.get("restaurants", [])]
     return any(name and name.lower() in lowered for name in names)
 
-
-def _names_offered_this_turn(
-    db: Session, conversation: Conversation, trace: list[dict]
-) -> list[str]:
-    """Every restaurant name the model is entitled to put in front of the customer
-    on this turn.
-
-    A name qualifies if a tool THIS TURN actually produced it, or if it is the
-    restaurant the conversation is already scoped to:
-
-      * any `restaurants[].name` from any find_restaurants result (more than one
-        search in a turn is legitimate, so all of them count);
-      * the selection-path `restaurant.name` — that shape returns a single
-        `restaurant` key and no `restaurants` list (see tools.find_restaurants);
-      * any `restaurant.name` from a get_menu result — if the model pulled the
-        menu, it has grounds to talk about that restaurant;
-      * the active restaurant, so "Pizza Junction mein biryani nahi hai, lekin
-        KBH mein hai" stays a valid answer (same carve-out _discovery_contradiction
-        makes).
-    """
-    names: list[str] = []
-
-    def _add(value) -> None:
-        if isinstance(value, str) and value and value not in names:
-            names.append(value)
-
-    for step in trace:
-        result = step.get("result")
-        if not isinstance(result, dict):
-            continue
-        if step.get("tool") == "find_restaurants":
-            for entry in result.get("restaurants") or []:
-                if isinstance(entry, dict):
-                    _add(entry.get("name"))
-        if step.get("tool") in ("find_restaurants", "get_menu"):
-            restaurant = result.get("restaurant")
-            if isinstance(restaurant, dict):
-                _add(restaurant.get("name"))
-
-    if conversation.active_restaurant_id is not None:
-        active = db.get(Restaurant, conversation.active_restaurant_id)
-        if active is not None:
-            _add(active.name)
-
-    return names
-
-
-def _discovery_padding(
-    db: Session, conversation: Conversation, reply: str | None, trace: list[dict]
-) -> bool:
-    """Issue 2: a GOOD discovery result padded with a restaurant that was not in it.
-
-    "Biryani hai?" returned only Karachi Biryani House — Pizza Junction matches
-    'biryani' on no field and no menu item — yet the reply offered both, and Pizza
-    Junction was later confirmed to have no biryani. The anchored-matching fix works
-    (the tool never returned it); what was missing is a check that the REPLY only
-    names what the search actually found.
-
-    Deliberately scoped to a non-empty result: a zero-match belongs to
-    _discovery_contradiction and a description-only match to _discovery_overclaim,
-    so the three guards partition the space instead of double-firing.
-
-    Allowed names are masked out of the reply BEFORE scanning for absent ones —
-    otherwise an allowed "Pizza Junction 2" would make the absent "Pizza Junction"
-    match as a substring of it.
-    """
-    if not reply:
-        return False
-    result = _latest_find_restaurants_result(trace)
-    if not result or not result.get("restaurants"):
-        return False
-
-    masked = reply.lower()
-    for name in _names_offered_this_turn(db, conversation, trace):
-        masked = masked.replace(name.lower(), " ")
-    return any(name.lower() in masked for name in _active_restaurant_names(db))
-
-
-# Tools that legitimately produce a list of restaurants. A numbered restaurant
-# list in a reply must be backed by one of these IN THE SAME TURN.
-_LISTING_TOOLS = ("list_restaurants", "find_restaurants", "search_restaurants_by_item")
-
-# "1. Karachi Biryani House" / "2) Wok & Roll" — the numbered-list shape the prompt
-# mandates for every restaurant list, in either language.
-_NUMBERED_LINE_RE = re.compile(r"^\s*\d+[.)]\s*(.+)$", re.MULTILINE)
-
-# Order numbers are generate_order_number()'s "AB-" + 6 uppercase hex. A reply
-# quoting one is talking about a placed order, not offering a menu of choices.
-_ORDER_NUMBER_RE = re.compile(r"\bAB-[0-9A-F]{6}\b")
-
-
-def _ungrounded_restaurant_list(
-    db: Session, reply: str | None, trace: list[dict]
-) -> bool:
-    """True when a reply presents a numbered list of restaurants that NO listing
-    tool produced this turn.
-
-    The failure the three discovery guards cannot see. Each of them reads a
-    find_restaurants result out of the trace, so when the model calls NO tool at
-    all they every one return False on their first line — and a turn with no tools
-    is the most dangerous kind, because then 100% of the claim is invented.
-
-    Production, conv 715: asked "Haleem hai?" the model called nothing, took the
-    four restaurants from its own greeting a message earlier, and answered "Here
-    are restaurants serving haleem: 1. Karachi Biryani House 2. Mandi House".
-    Nothing in the catalog matches "haleem" at all. The next turn it reported the
-    same list minus one entry, again with only a get_menu call behind it.
-
-    Deliberately structural rather than phrase-based: it keys on the numbered-list
-    SHAPE the prompt already mandates, so it works identically in Roman Urdu and
-    English and needs no vocabulary list to stay correct.
-    """
-    if not reply:
-        return False
-
-    # A listing tool ran — whatever it returned, the content guards
-    # (_discovery_contradiction / _overclaim / _padding) are the ones on duty.
-    if any(step.get("tool") in _LISTING_TOOLS for step in trace):
-        return False
-
-    # Past-order talk legitimately enumerates restaurants ("1. AB-2992A8 from Wok
-    # & Roll") without any listing tool, and must not be suppressed.
-    if _ORDER_NUMBER_RE.search(reply) or _tool_called_this_turn(trace, "get_order_status"):
-        return False
-
-    names = [name.lower() for name in _active_restaurant_names(db)]
-    listed = sum(
-        1
-        for match in _NUMBERED_LINE_RE.finditer(reply)
-        if any(name in match.group(1).lower() for name in names)
-    )
-    # Two, not one: a single numbered line naming a restaurant is usually a
-    # confirmation ("1. Pizza Junction — your order"), whereas two or more is
-    # unambiguously an offer of choices. Precision over recall, on purpose.
-    return listed >= 2
 
 
 def _customer_language(db: Session, conversation: Conversation) -> str:
@@ -1326,6 +1129,7 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
     forced_once = False
     total_corrected_once = False
     discovery_corrected_once = False
+    grounding_corrected_once = False
     language_corrected_once = False
 
     # Loop detection for read-only tools: the model has been observed calling the
@@ -1404,36 +1208,26 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                 )
                 continue
 
-            # Bug 1 + AB-F6DF70 — read-back total not produced by preview_bill. The
-            # model stated a Total it computed itself (a bare subtotal, or a made-up
-            # rate like 10% + an invented delivery fee). That number must never reach
-            # the customer, so suppress this reply and force preview_bill; the next
-            # round produces a correct read-back. Fires once.
-            if not total_corrected_once and _readback_bill_is_unbacked(text, trace):
-                total_corrected_once = True
-                force_next = True
-                logger.info(
-                    "conversation %s showed a bill no preview_bill produced (%r); forcing preview_bill",
-                    conversation.id,
-                    text[:80],
+
+            # GROUNDING AUDIT — one check for "is this reply backed by something
+            # real". Replaces three guards that each grew around one production
+            # failure (ungrounded restaurant list, discovery padding, unbacked
+            # bill); see services/grounding.py for the rule it applies and for the
+            # design correction that context-grounding of NAMES does not work.
+            if not grounding_corrected_once:
+                violation = grounding.audit(
+                    db, conversation, text, trace,
+                    customer_figures=grounding.figures_the_customer_wrote(db, conversation),
                 )
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "The bill you just showed was NOT produced by preview_bill "
-                            "— you cannot compute a bill yourself, and you must never "
-                            "show Subtotal/Tax/Delivery/Total lines that did not come "
-                            "from it. Call preview_bill now with the customer's "
-                            "payment method, delivery address and contact name, then "
-                            "read back its EXACT figures. If it tells you a detail is "
-                            "still missing, ask the customer for that instead and show "
-                            "no bill at all this turn. Never invent a tax rate or "
-                            "delivery fee, and never show Rs. 0 for either."
-                        ),
-                    }
-                )
-                continue
+                if violation is not None:
+                    grounding_corrected_once = True
+                    force_next = force_next or violation.force_tool
+                    logger.info(
+                        "conversation %s ungrounded reply (%s): %r",
+                        conversation.id, violation.kind, text[:80],
+                    )
+                    messages.append({"role": "system", "content": violation.nudge})
+                    continue
 
             # Bug 3 — discovery dishonesty. Either the model contradicted a genuine
             # zero-match by naming restaurants anyway ("no burgers" + a restaurant
@@ -1468,72 +1262,7 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                 )
                 continue
 
-            # Issue 2 — discovery padding. The search returned a real, non-empty
-            # shortlist and the model added a restaurant that was not in it ("biryani"
-            # → Karachi Biryani House, reply offered Pizza Junction too, which serves
-            # no biryani). Shares discovery_corrected_once: at most one discovery
-            # honesty correction per turn. No forced tool — the honest fix is to drop
-            # the invented name, and get_menu stays a free choice if the model wants
-            # to earn the right to talk about another restaurant.
-            if not discovery_corrected_once and _discovery_padding(
-                db, conversation, text, trace
-            ):
-                discovery_corrected_once = True
-                logger.info(
-                    "conversation %s named a restaurant the search did not return (%r); regenerating",
-                    conversation.id,
-                    text[:80],
-                )
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "Your draft names a restaurant that was NOT in the search "
-                            "result. Name ONLY the restaurants the search actually "
-                            "returned — do not add others from earlier in the chat or "
-                            "from memory. If you want to say what a different "
-                            "restaurant does or does not serve, call get_menu for it "
-                            "first; never assert that without checking. Rewrite the "
-                            "reply accordingly."
-                        ),
-                    }
-                )
-                continue
 
-            # Issue #1 — a restaurant list nothing produced. The model answered a
-            # dish question with no tool call at all and invented the shortlist from
-            # the greeting it had sent a message earlier. The three guards above all
-            # read a find_restaurants result out of the trace, so an empty trace is
-            # invisible to them. Force a real search: for the haleem case that ends
-            # in a genuine zero-match, whose _empty_result_note tells the model to
-            # say plainly that we do not have it.
-            if not discovery_corrected_once and _ungrounded_restaurant_list(
-                db, text, trace
-            ):
-                discovery_corrected_once = True
-                force_next = True
-                logger.info(
-                    "conversation %s listed restaurants no tool returned (%r); forcing a search",
-                    conversation.id,
-                    text[:80],
-                )
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "You listed restaurants without calling any tool this "
-                            "turn — that list came from memory, not from our "
-                            "catalogue, so it may be entirely wrong. Never list "
-                            "restaurants you have not just looked up. Call "
-                            "find_restaurants with the dish or cuisine the customer "
-                            "asked about (or list_restaurants if they asked for "
-                            "everything), then answer ONLY from what it returns. If "
-                            "it finds nothing, say plainly that the item is not "
-                            "available and do not name any restaurant."
-                        ),
-                    }
-                )
-                continue
 
             # Language mismatch. Runs LAST of the content checks: getting the facts
             # right matters more than getting the language right, so a reply is only
