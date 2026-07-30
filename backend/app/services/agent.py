@@ -993,6 +993,18 @@ def _active_restaurant_names(db: Session) -> list[str]:
     )
 
 
+# What to tell the model when a reply misrepresents a search result. Shared by the
+# tool loop and by the salvage path, so both correct the same failure the same way.
+DISCOVERY_NUDGE = (
+    "Your draft reply misrepresents the search result. If the search found the "
+    "dish NOWHERE, say plainly and first that it is not available and offer the "
+    "available CUISINES — do NOT list or name any restaurant. If the match was "
+    "description-only (weak / unconfirmed), do NOT claim the restaurant serves "
+    "it — offer it as a possibility and call get_menu to check first. Rewrite "
+    "the reply accordingly."
+)
+
+
 def _discovery_contradiction(
     db: Session, conversation: Conversation, reply: str | None, trace: list[dict]
 ) -> bool:
@@ -1093,7 +1105,9 @@ def _safe_text(text: str | None) -> str:
     return text or ""
 
 
-def _force_text_reply(client: Groq, messages: list[dict]) -> str:
+def _force_text_reply(
+    client: Groq, messages: list[dict], extra_nudge: str | None = None
+) -> str:
     """Ask for prose with tools switched off.
 
     Needed in two places, both of which produced silent failures in testing: the
@@ -1108,16 +1122,85 @@ def _force_text_reply(client: Groq, messages: list[dict]) -> str:
             "content": (
                 "Do not call any more tools. Using only the tool results above, reply "
                 "to the customer now. If an order was placed, give them the order "
-                "number and total."
+                "number and total. Do NOT name any restaurant, dish, price or total "
+                "that does not appear in those results — with tools switched off you "
+                "cannot check anything, so anything you add here is invention. If the "
+                "results do not cover what the customer asked about, say plainly that "
+                "you could not complete the request and ask them to try again; that "
+                "is always better than making something up."
             ),
         }
     ]
+    if extra_nudge:
+        messages = messages + [{"role": "system", "content": extra_nudge}]
     completion = _complete(client, messages, use_tools=False)
     return (completion.choices[0].message.content or "").strip()
 
 
+def _salvage_violation(
+    db: Session, conversation: Conversation, text: str, trace: list[dict]
+) -> grounding.Violation | None:
+    """The content checks a salvaged reply must pass: is every claim backed by the
+    trace, and does it represent the search result honestly.
+
+    The LANGUAGE check is deliberately not here. It is cosmetic, this path is
+    already degraded, and the single corrective pass we can afford is better spent
+    on facts — a reply in the wrong language beats an invented one.
+    """
+    violation = grounding.audit(
+        db, conversation, text, trace,
+        customer_figures=grounding.figures_the_customer_wrote(db, conversation),
+    )
+    if violation is not None:
+        return violation
+    if _discovery_contradiction(db, conversation, text, trace) or _discovery_overclaim(
+        conversation, text, trace
+    ):
+        return grounding.Violation("discovery_dishonesty", DISCOVERY_NUDGE)
+    return None
+
+
+def _order_report(trace: list[dict]) -> str | None:
+    """A reply built from the trace instead of from model prose: the order number
+    and total of an order this turn actually placed, or None if none was.
+
+    This is what makes suppressing an untrusted salvaged reply safe. Without it,
+    "don't send the fabrication" would recreate the exact failure the salvage path
+    was built for — the old "sorry, say that again" that hid a real order from a
+    customer, who then re-ordered it.
+
+    Roman-Urdu-only, matching FAKE_LINK_REPLACEMENT. That is the known canned-reply
+    language gap (followups-deferred #2), fixed for all of them together.
+    """
+    for step in reversed(trace):
+        if step.get("tool") != "place_order":
+            continue
+        result = step.get("result")
+        if not isinstance(result, dict):
+            continue
+        number = result.get("order_number")
+        if not number:
+            continue
+        parts = [f"Aapka order {number} place ho chuka hai."]
+        total = result.get("total")
+        if total:
+            parts.append(f"Total: Rs. {total}.")
+        # A real link from THIS result only — never invented, so the fake-link
+        # guard downstream has nothing to catch.
+        link = result.get("payment_link")
+        if link:
+            parts.append(f"Payment link: {link}")
+        parts.append("Koi aur cheez chahiye?")
+        return " ".join(parts)
+    return None
+
+
 def _salvage_reply(
-    client: Groq, messages: list[dict], trace: list[dict], conversation: Conversation
+    db: Session,
+    client: Groq,
+    messages: list[dict],
+    trace: list[dict],
+    conversation: Conversation,
 ) -> str:
     """The reply for a turn that could not finish normally — a malformed tool call
     Groq rejected, or the round budget running out.
@@ -1156,7 +1239,30 @@ def _salvage_reply(
             conversation.id,
         )
         return FALLBACK_REPLY
-    return _safe_text(_force_text_reply(client, messages))
+
+    text = _safe_text(_force_text_reply(client, messages))
+    violation = _salvage_violation(db, conversation, text, trace)
+    if violation is None:
+        return text
+
+    # One corrective pass, still tools-off. Anything more would spend Groq calls on
+    # a turn that has already failed twice.
+    logger.warning(
+        "conversation %s: salvaged reply was ungrounded (%s); regenerating once: %r",
+        conversation.id, violation.kind, text[:80],
+    )
+    text = _safe_text(_force_text_reply(client, messages, extra_nudge=violation.nudge))
+    if _salvage_violation(db, conversation, text, trace) is None:
+        return text
+
+    # It fabricated twice with tools off. Stop asking and answer from the trace
+    # ourselves — never send this prose.
+    logger.error(
+        "conversation %s: salvaged reply still ungrounded after correction; "
+        "suppressing and reporting from the trace: %r",
+        conversation.id, text[:80],
+    )
+    return _order_report(trace) or FALLBACK_REPLY
 
 
 def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[dict]]:
@@ -1221,7 +1327,7 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
             logger.warning(
                 "conversation %s: malformed tool call, falling back to text", conversation.id
             )
-            return _salvage_reply(client, messages, trace, conversation), trace
+            return _salvage_reply(db, client, messages, trace, conversation), trace
 
         choice = completion.choices[0].message
         force_next = False
@@ -1290,20 +1396,7 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                     conversation.id,
                     text[:80],
                 )
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "Your draft reply misrepresents the search result. If the "
-                            "search found the dish NOWHERE, say plainly and first that "
-                            "it is not available and offer the available CUISINES — do "
-                            "NOT list or name any restaurant. If the match was "
-                            "description-only (weak / unconfirmed), do NOT claim the "
-                            "restaurant serves it — offer it as a possibility and call "
-                            "get_menu to check first. Rewrite the reply accordingly."
-                        ),
-                    }
-                )
+                messages.append({"role": "system", "content": DISCOVERY_NUDGE})
                 continue
 
 
@@ -1425,7 +1518,7 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
     # entirely on guard regenerations, which run no tools at all; _salvage_reply
     # refuses to summarise a trace that does not exist.
     logger.warning("conversation %s hit MAX_TOOL_ROUNDS; forcing a text reply", conversation.id)
-    return _salvage_reply(client, messages, trace, conversation), trace
+    return _salvage_reply(db, client, messages, trace, conversation), trace
 
 
 def _send_and_log(db: Session, conversation: Conversation, reply: str) -> None:

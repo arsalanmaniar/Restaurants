@@ -1238,16 +1238,150 @@ class TestSalvageNeverInvents:
 
             chat = types.SimpleNamespace(completions=_Completions())
 
-        reply = agent._salvage_reply(ExplodingClient(), [], [], conversation)
+        reply = agent._salvage_reply(db, ExplodingClient(), [], [], conversation)
         assert reply == agent.FALLBACK_REPLY
 
     def test_salvage_helper_does_summarise_a_real_trace(self, db, conversation, monkeypatch):
         """The other half of the invariant — a non-empty trace is still salvaged."""
         monkeypatch.setattr(
-            agent, "_force_text_reply", lambda client, messages: "Aapka order AB-123456 place ho gaya."
+            agent,
+            "_force_text_reply",
+            lambda client, messages, extra_nudge=None: "Aapka order AB-123456 place ho gaya.",
         )
         trace = [{"tool": "place_order", "result": {"order_number": "AB-123456"}}]
 
-        reply = agent._salvage_reply(object(), [], trace, conversation)
+        reply = agent._salvage_reply(db, object(), [], trace, conversation)
 
         assert reply == "Aapka order AB-123456 place ho gaya."
+
+
+class TestSalvagedReplyIsAudited:
+    """1.2 — the salvaged reply itself goes through the content checks.
+
+    Closing the empty-trace hole (1.1) stopped the model inventing from NOTHING.
+    It can still invent on top of a real trace: `_force_text_reply` runs with tools
+    off and, before this, its output went straight to the customer with no audit.
+    """
+
+    def _texts(self, monkeypatch, *replies):
+        """Script successive `_force_text_reply` returns and record the nudges."""
+        stream = iter(replies)
+        seen = []
+
+        def fake(client, messages, extra_nudge=None):
+            seen.append(extra_nudge)
+            return next(stream)
+
+        monkeypatch.setattr(agent, "_force_text_reply", fake)
+        return seen
+
+    # A trace that legitimately grounds ONE restaurant, so a reply naming a
+    # DIFFERENT one is unambiguously fabricated.
+    TRACE = [{
+        "tool": "find_restaurants",
+        "result": {"restaurants": [{"id": 2, "name": "Karachi Biryani House"}]},
+    }]
+
+    FABRICATED = (
+        "Qorma serve karne wale restaurants:\n"
+        "1. Karachi Biryani House\n"
+        "2. Mandi House\n\n"
+        "Aap kis restaurant se order karna chahenge?"
+    )
+
+    def test_clean_salvaged_reply_passes_straight_through(
+        self, db, conversation, monkeypatch,
+    ):
+        nudges = self._texts(monkeypatch, "Karachi Biryani House se order kar sakte hain.")
+
+        reply = agent._salvage_reply(db, object(), [], self.TRACE, conversation)
+
+        assert reply == "Karachi Biryani House se order kar sakte hain."
+        assert nudges == [None], "a clean reply must not trigger a corrective pass"
+
+    def test_fabricated_salvaged_reply_is_corrected_once(
+        self, db, conversation, monkeypatch,
+    ):
+        """The list names Mandi House, which no tool returned. One corrective pass,
+        carrying the auditor's own nudge; the clean retry is what the customer gets."""
+        nudges = self._texts(
+            monkeypatch, self.FABRICATED, "Karachi Biryani House available hai.",
+        )
+
+        reply = agent._salvage_reply(db, object(), [], self.TRACE, conversation)
+
+        assert reply == "Karachi Biryani House available hai."
+        assert nudges[0] is None
+        assert nudges[1] is not None, "the retry must carry the violation nudge"
+        assert "search" in nudges[1].lower() or "list" in nudges[1].lower()
+
+    def test_fabricating_twice_is_suppressed_not_sent(
+        self, db, conversation, monkeypatch,
+    ):
+        """No order in the trace, so there is nothing truthful to report — the
+        customer gets the honest fallback rather than the second fabrication."""
+        self._texts(monkeypatch, self.FABRICATED, self.FABRICATED)
+
+        reply = agent._salvage_reply(db, object(), [], self.TRACE, conversation)
+
+        assert reply == agent.FALLBACK_REPLY
+        assert "Mandi House" not in reply
+
+    def test_fabricating_twice_still_reports_a_real_order(
+        self, db, conversation, monkeypatch,
+    ):
+        """THE REGRESSION THIS PATH EXISTS TO PREVENT. Suppressing untrusted prose
+        must never hide an order that was actually placed — that is the old
+        'sorry, say that again' failure, where the customer re-ordered."""
+        self._texts(monkeypatch, self.FABRICATED, self.FABRICATED)
+        trace = self.TRACE + [{
+            "tool": "place_order",
+            "result": {"order_number": "AB-C5475E", "total": "980.00"},
+        }]
+
+        reply = agent._salvage_reply(db, object(), [], trace, conversation)
+
+        assert "AB-C5475E" in reply
+        assert "980.00" in reply
+        assert "Mandi House" not in reply
+        assert reply != agent.FALLBACK_REPLY
+
+
+class TestOrderReport:
+    """The deterministic reply, built from the trace rather than from model prose."""
+
+    def test_reports_order_number_and_total(self):
+        report = agent._order_report(
+            [{"tool": "place_order", "result": {"order_number": "AB-123456", "total": "712.50"}}]
+        )
+        assert "AB-123456" in report
+        assert "712.50" in report
+
+    def test_includes_a_real_payment_link_verbatim(self):
+        report = agent._order_report([{
+            "tool": "place_order",
+            "result": {
+                "order_number": "AB-123456",
+                "total": "712.50",
+                "payment_link": "https://pay.example.test/abc123",
+            },
+        }])
+        assert "https://pay.example.test/abc123" in report
+
+    def test_none_when_no_order_was_placed(self):
+        assert agent._order_report([{"tool": "get_menu", "result": {"items": []}}]) is None
+        assert agent._order_report([]) is None
+
+    def test_none_when_place_order_failed(self):
+        """An error result carries no order_number — there is nothing to report."""
+        assert agent._order_report(
+            [{"tool": "place_order", "result": {"error": "missing_address"}}]
+        ) is None
+
+    def test_reports_a_duplicate_prevented_order(self):
+        """duplicate_prevented still names a REAL order the customer has."""
+        report = agent._order_report([{
+            "tool": "place_order",
+            "result": {"duplicate_prevented": True, "order_number": "AB-999999", "total": "500.00"},
+        }])
+        assert "AB-999999" in report
