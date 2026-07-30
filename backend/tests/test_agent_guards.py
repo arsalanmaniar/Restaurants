@@ -1119,3 +1119,135 @@ class TestRomanUrduStallPatterns:
             "Order place ho gaya hai.",
         ):
             assert agent._is_stall(ordinary) is False
+
+
+# --------------------------------------------------------------------------- #
+# Salvage never invents (conversation 723)
+# --------------------------------------------------------------------------- #
+
+
+def _bad_request(message="tool_use_failed: could not parse tool call"):
+    """The 400 Groq returns when the model emits a syntactically broken tool call."""
+    import httpx
+    from groq import BadRequestError
+
+    return BadRequestError(
+        message,
+        response=httpx.Response(400, request=httpx.Request("POST", "https://api.groq.test")),
+        body=None,
+    )
+
+
+@pytest.fixture
+def scripted_model_raising(monkeypatch):
+    """Like `scripted_model`, but any Exception in the sequence is RAISED rather
+    than returned — needed to drive the malformed-tool-call path."""
+
+    def install(responses):
+        stream = iter(responses)
+        calls = {"count": 0}
+
+        class Completions:
+            def create(self, **kwargs):
+                calls["count"] += 1
+                item = next(stream)
+                if isinstance(item, Exception):
+                    raise item
+                return item
+
+        class Client:
+            chat = types.SimpleNamespace(completions=Completions())
+
+        monkeypatch.setattr(agent, "_client", lambda: Client())
+        return calls
+
+    return install
+
+
+class TestSalvageNeverInvents:
+    """`generate_reply` has two escape hatches that return WITHOUT running the
+    grounding, discovery or language guards: a malformed tool call Groq rejects,
+    and the round budget running out. Both call `_force_text_reply`, which asks the
+    model to answer "using only the tool results above" with tools switched off.
+
+    That is correct when tools ran — place_order may have succeeded, and dropping
+    the turn hid a real order from a customer who then re-ordered it. It is
+    catastrophic when NOTHING ran: there are no results above, no guard downstream,
+    and the model fills the vacuum. Conversation 723 [1027], a real customer:
+
+        "Qorma serve karne wale restaurants:
+         1. Karachi Biryani House
+         2. Mandi House"
+
+    No tool returned that list (the row's `meta` is NULL — the trace was empty),
+    Mandi House had never been shown to that customer, and Qorma exists nowhere in
+    the catalogue. grounding.audit flags it `unlisted_offer` on replay; it was
+    never asked, because this path skips the audit entirely.
+    """
+
+    def test_no_tool_ran_so_no_reply_is_invented(
+        self, db, conversation, scripted_model_raising,
+    ):
+        """THE CONVERSATION 723 CASE. Every attempt is malformed, nothing executes,
+        retries run out. The customer must get the honest fallback — never prose
+        the model composed out of nothing."""
+        calls = scripted_model_raising([
+            _bad_request(),   # attempt 1 -> retry
+            _bad_request(),   # attempt 2 -> retry
+            _bad_request(),   # attempt 3 -> retries exhausted
+        ])
+
+        reply, trace = agent.generate_reply(db, conversation)
+
+        assert trace == []
+        assert reply == agent.FALLBACK_REPLY
+        # Exactly 3 calls: the salvage completion was never even attempted. If a 4th
+        # had been made, the model would have been invited to invent from nothing.
+        assert calls["count"] == 3
+
+    def test_salvage_still_reports_a_turn_where_tools_DID_run(
+        self, db, conversation, scripted_model_raising,
+    ):
+        """The reason this path exists must survive the fix: once a tool has run,
+        a later malformed call still salvages the turn rather than losing it."""
+        calls = scripted_model_raising([
+            completion(message(tool_calls=[tool_call("c1", "list_restaurants", {})])),
+            _bad_request(),                                   # now trace is non-empty
+            completion(message(content="Yeh restaurants available hain: ...")),
+        ])
+
+        reply, trace = agent.generate_reply(db, conversation)
+
+        assert trace, "a tool ran; the trace must not be empty"
+        assert reply == "Yeh restaurants available hain: ..."
+        assert reply != agent.FALLBACK_REPLY
+        assert calls["count"] == 3  # the salvage completion WAS made
+
+    def test_salvage_helper_refuses_to_call_the_model_on_an_empty_trace(
+        self, db, conversation,
+    ):
+        """Unit-level invariant, covering BOTH call sites at once: with nothing to
+        report, `_salvage_reply` must not reach the model at all."""
+
+        class ExplodingClient:
+            class _Completions:
+                def create(self, **kwargs):
+                    raise AssertionError(
+                        "the model must not be asked to summarise an empty trace"
+                    )
+
+            chat = types.SimpleNamespace(completions=_Completions())
+
+        reply = agent._salvage_reply(ExplodingClient(), [], [], conversation)
+        assert reply == agent.FALLBACK_REPLY
+
+    def test_salvage_helper_does_summarise_a_real_trace(self, db, conversation, monkeypatch):
+        """The other half of the invariant — a non-empty trace is still salvaged."""
+        monkeypatch.setattr(
+            agent, "_force_text_reply", lambda client, messages: "Aapka order AB-123456 place ho gaya."
+        )
+        trace = [{"tool": "place_order", "result": {"order_number": "AB-123456"}}]
+
+        reply = agent._salvage_reply(object(), [], trace, conversation)
+
+        assert reply == "Aapka order AB-123456 place ho gaya."

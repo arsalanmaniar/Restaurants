@@ -1116,6 +1116,49 @@ def _force_text_reply(client: Groq, messages: list[dict]) -> str:
     return (completion.choices[0].message.content or "").strip()
 
 
+def _salvage_reply(
+    client: Groq, messages: list[dict], trace: list[dict], conversation: Conversation
+) -> str:
+    """The reply for a turn that could not finish normally — a malformed tool call
+    Groq rejected, or the round budget running out.
+
+    Salvage exists for exactly ONE reason: tools may ALREADY have run, possibly
+    including place_order, and silently dropping the turn hid a real order from a
+    customer who then re-ordered it. That reason requires a non-empty trace.
+
+    With an EMPTY trace there is nothing to salvage, and _force_text_reply turns
+    dangerous: it tells the model to answer "using only the tool results above"
+    when there are none, with tools switched off — and because both call sites
+    return straight to the caller, NO grounding, discovery or language guard runs
+    on what comes back. The model fills the vacuum. Conversation 723 reached a
+    real customer this way:
+
+        "Qorma serve karne wale restaurants:
+         1. Karachi Biryani House
+         2. Mandi House"
+
+    — a restaurant list no tool returned, naming a restaurant never shown to that
+    customer, for a dish that exists nowhere in the catalogue. Replaying
+    grounding.audit over that reply reports `unlisted_offer`; it was never asked,
+    because this path skips it.
+
+    Both ways in can arrive with an empty trace:
+      * malformed tool calls, retries exhausted, nothing ever executed;
+      * MAX_TOOL_ROUNDS spent on guard regenerations (stall, grounding, discovery,
+        language each `continue` without running a tool).
+
+    Nothing ran, so the honest answer is that nothing happened.
+    """
+    if not trace:
+        logger.error(
+            "conversation %s: turn failed with no tool result to report; refusing to "
+            "generate an ungrounded reply",
+            conversation.id,
+        )
+        return FALLBACK_REPLY
+    return _safe_text(_force_text_reply(client, messages))
+
+
 def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[dict]]:
     """Run the tool loop and return (reply_text, tool_trace)."""
     messages = _build_messages(db, conversation)
@@ -1172,12 +1215,13 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                 )
                 continue
 
-            # Tools already ran (possibly including place_order) — salvage the turn
-            # by reporting what happened rather than losing it.
+            # Tools may already have run (possibly including place_order) — salvage
+            # the turn by reporting what happened rather than losing it. If nothing
+            # ran, _salvage_reply refuses to invent one.
             logger.warning(
                 "conversation %s: malformed tool call, falling back to text", conversation.id
             )
-            return _safe_text(_force_text_reply(client, messages)), trace
+            return _salvage_reply(client, messages, trace, conversation), trace
 
         choice = completion.choices[0].message
         force_next = False
@@ -1375,11 +1419,13 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                     )
                 read_only_result_hashes.add(result_hash)
 
-    # Round budget exhausted while still calling tools. Critically, place_order may
-    # have already run — the old behaviour ("sorry, say that again") hid a real
-    # order from the customer, who then re-ordered. Force a reply from the results.
+    # Round budget exhausted. Critically, place_order may have already run — the old
+    # behaviour ("sorry, say that again") hid a real order from the customer, who
+    # then re-ordered. Force a reply from the results. The budget can also be spent
+    # entirely on guard regenerations, which run no tools at all; _salvage_reply
+    # refuses to summarise a trace that does not exist.
     logger.warning("conversation %s hit MAX_TOOL_ROUNDS; forcing a text reply", conversation.id)
-    return _safe_text(_force_text_reply(client, messages)), trace
+    return _salvage_reply(client, messages, trace, conversation), trace
 
 
 def _send_and_log(db: Session, conversation: Conversation, reply: str) -> None:
