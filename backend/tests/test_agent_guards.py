@@ -7,12 +7,14 @@ actually produced during development.
 
 import json
 import types
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
 
 from app.models import OrderStatus, PaymentMethod
 from app.services import agent
+from app.services import conversations as convo
 from app.services import grounding
 from app.services import billing
 from app.services import tools
@@ -676,6 +678,58 @@ class TestSwitchToOnlineAfterCodGuard:
         assert agent._switch_to_online_after_cod(
             db, conversation, "online payment", trace=[]
         ) is False
+
+    def test_detector_ignores_an_order_from_a_PREVIOUS_conversation(
+        self, db, cod_order, conversation,
+    ):
+        """THE CONVERSATION 723 CASE. The customer placed a COD order days ago in
+        another conversation, then started a fresh one and said "... aur online".
+        They were told "aapka order pehle hi Cash on Delivery par place ho chuka
+        hai" about an order they had not mentioned and could not see.
+
+        Simulated the way it really happened: the order predates this
+        conversation's start.
+        """
+        from datetime import timedelta
+
+        conversation.created_at = agent._as_utc(cod_order.created_at) + timedelta(minutes=5)
+        db.flush()
+
+        assert agent._switch_to_online_after_cod(
+            db, conversation, "Address hai jubilee market aur online", trace=[]
+        ) is False
+
+    def test_detector_ignores_an_order_older_than_the_recency_window(
+        self, db, cod_order, conversation,
+    ):
+        """The second bound, independent of conversation scoping: a conversation
+        kept alive for days by messages inside the idle window must not resurrect
+        an order from its first day.
+
+        AB-5ABBE2 sat PENDING for five days and stayed "live" the whole time —
+        restaurants rarely accept or cancel, so the status check bounds nothing.
+        """
+        from datetime import timedelta
+
+        stale = datetime.now(timezone.utc) - convo.CONVERSATION_IDLE_TIMEOUT - timedelta(hours=1)
+        cod_order.created_at = stale
+        conversation.created_at = stale - timedelta(minutes=5)  # same conversation
+        db.flush()
+
+        assert cod_order.status not in (OrderStatus.CANCELLED, OrderStatus.DELIVERED)
+        assert agent._switch_to_online_after_cod(
+            db, conversation, "online payment karni hai", trace=[]
+        ) is False
+
+    def test_detector_still_fires_for_an_order_placed_in_this_conversation(
+        self, db, cod_order, conversation,
+    ):
+        """The Bug 2 fix must survive the narrowing: an order placed moments ago
+        in THIS conversation still gets the deterministic steer."""
+        assert agent._as_utc(cod_order.created_at) >= agent._as_utc(conversation.created_at)
+        assert agent._switch_to_online_after_cod(
+            db, conversation, "online payment kar sakta hoon?", trace=[]
+        ) is True
 
     def test_ignored_switch_reply_is_replaced_end_to_end(
         self, db, cod_order, conversation, scripted_model, monkeypatch,

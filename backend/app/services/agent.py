@@ -16,6 +16,7 @@ durable until that commit.
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from groq import BadRequestError, Groq, GroqError
@@ -164,6 +165,12 @@ def _cart_matches_order(conversation: Conversation, order: Order) -> bool:
     return sorted(cart) == sorted(ordered)
 
 
+def _as_utc(moment: datetime) -> datetime:
+    """Postgres hands these back timezone-aware, but not every path does — the
+    same normalisation conversations._is_stale applies before comparing."""
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
 def _switch_to_online_after_cod(
     db: Session, conversation: Conversation, body: str | None, trace: list[dict]
 ) -> bool:
@@ -177,11 +184,29 @@ def _switch_to_online_after_cod(
       * the inbound asks to pay online / names an online gateway,
       * this turn placed no order (a real new online order, with its own link, must
         pass through untouched),
-      * the customer's most recent order is a LIVE COD order (not delivered/cancelled),
+      * the customer has a LIVE COD order from THIS conversation, placed recently,
       * the cart is EMPTY, or it is just a REBUILD of that order (same items). The
         old gate bailed on ANY non-empty cart, so the model re-adding the placed
         order's items defeated it (AB-F6DF70); matching the cart against the order
         catches that while still stepping aside for a genuinely different new order.
+
+    The lookup used to be customer-scoped with no time bound, which made this
+    guard permanently armed. Conversation 723: a customer browsing on 2026-07-30
+    said "Address hai jubilee market aur online" and was told "aapka order pehle
+    hi Cash on Delivery par place ho chuka hai" — about AB-5ABBE2, placed four
+    days and eighteen hours earlier in a different conversation. They had placed
+    nothing at all this time.
+
+    The status check reads like a liveness test but is not one: restaurants rarely
+    accept or cancel, so 12 of prod's 19 orders (8 PENDING + 2 ACCEPTED + 2 READY
+    COD) never leave the "live" set. Recency is what actually bounds this.
+
+    Scoping is by TIME rather than by conversation id, because `orders` has no
+    conversation_id column. get_or_create_conversation mints a fresh Conversation
+    once a customer has been idle for CONVERSATION_IDLE_TIMEOUT, so an order
+    predating this conversation's created_at belongs to an earlier one. The
+    recency bound is the belt-and-braces half, for a conversation kept alive for
+    days by messages arriving inside the idle window.
     """
     if not body:
         return False
@@ -190,9 +215,18 @@ def _switch_to_online_after_cod(
         return False
     if _placed_an_order_this_turn(trace):
         return False
+    # The order must be at least as recent as BOTH bounds, so one comparison
+    # against the later of the two says it.
+    cutoff = max(
+        _as_utc(conversation.created_at),
+        datetime.now(timezone.utc) - convo.CONVERSATION_IDLE_TIMEOUT,
+    )
     last_order = db.scalar(
         select(Order)
-        .where(Order.customer_id == conversation.customer_id)
+        .where(
+            Order.customer_id == conversation.customer_id,
+            Order.created_at >= cutoff,
+        )
         .order_by(Order.id.desc())
         .limit(1)
     )
