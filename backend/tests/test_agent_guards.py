@@ -1347,6 +1347,105 @@ class TestSalvagedReplyIsAudited:
         assert reply != agent.FALLBACK_REPLY
 
 
+class TestRepeatGroundingViolationIsSuppressed:
+    """1.4 — the main tool loop must not send a SECOND fabrication either.
+
+    The grounding audit used to be gated on `grounding_corrected_once`, so after
+    one correction it never ran again and the regenerated draft was delivered
+    unaudited — "correct once, then send whatever comes back". A model that
+    fabricated the same restaurant list twice had the second copy sent.
+
+    This was also asymmetric with the salvage path, which since 1.2 suppresses a
+    reply that fabricates twice. Same failure, two different outcomes depending on
+    which code path the turn happened to take.
+
+    One correction is still all that is spent; only the terminal action changed.
+    """
+
+    FABRICATED = (
+        "Qorma serve karne wale restaurants:\n"
+        "1. Karachi Biryani House\n"
+        "2. Mandi House\n\n"
+        "Aap kis restaurant se order karna chahenge?"
+    )
+
+    def _find_restaurants_call(self):
+        return tool_call("c1", "find_restaurants", {"query": "qorma"})
+
+    def test_corrected_reply_that_is_clean_is_sent_normally(
+        self, db, conversation, scripted_model,
+    ):
+        """THE OVER-SUPPRESSION GUARD. One fabrication, then a clean reply — the
+        customer must get the clean reply, exactly as before this change."""
+        scripted_model([
+            completion(message(tool_calls=[self._find_restaurants_call()])),
+            completion(message(content=self.FABRICATED)),          # audited -> corrected
+            completion(message(content="Qorma kisi bhi restaurant mein nahi hai.")),
+        ])
+
+        reply, _trace = agent.generate_reply(db, conversation)
+
+        assert reply == "Qorma kisi bhi restaurant mein nahi hai."
+        assert reply != agent.FALLBACK_REPLY
+
+    def test_fabricating_twice_is_suppressed(self, db, conversation, scripted_model):
+        """The second fabrication must never reach the customer."""
+        scripted_model([
+            completion(message(tool_calls=[self._find_restaurants_call()])),
+            completion(message(content=self.FABRICATED)),   # corrected
+            completion(message(content=self.FABRICATED)),   # repeat -> suppressed
+        ])
+
+        reply, _trace = agent.generate_reply(db, conversation)
+
+        assert reply == agent.FALLBACK_REPLY
+        assert "Mandi House" not in reply
+
+    def test_fabricating_twice_still_reports_a_real_order(
+        self, db, conversation, scripted_model, monkeypatch,
+    ):
+        """Suppression must not hide an order that was actually placed."""
+        monkeypatch.setattr(
+            agent,
+            "_order_report",
+            lambda trace: "Aapka order AB-C5475E place ho chuka hai. Total: Rs. 980.00.",
+        )
+        scripted_model([
+            completion(message(tool_calls=[self._find_restaurants_call()])),
+            completion(message(content=self.FABRICATED)),
+            completion(message(content=self.FABRICATED)),
+        ])
+
+        reply, _trace = agent.generate_reply(db, conversation)
+
+        assert "AB-C5475E" in reply
+        assert "Mandi House" not in reply
+
+    def test_the_audit_runs_on_the_second_draft_at_all(
+        self, db, conversation, scripted_model, monkeypatch,
+    ):
+        """Pins the ungating itself. Before this change the audit was called at
+        most ONCE per turn; the second draft was never examined."""
+        seen = []
+        real_audit = agent.grounding.audit
+
+        def counting_audit(db_, conv, reply, trace, **kw):
+            seen.append(reply)
+            return real_audit(db_, conv, reply, trace, **kw)
+
+        monkeypatch.setattr(agent.grounding, "audit", counting_audit)
+        scripted_model([
+            completion(message(tool_calls=[self._find_restaurants_call()])),
+            completion(message(content=self.FABRICATED)),
+            completion(message(content=self.FABRICATED)),
+        ])
+
+        agent.generate_reply(db, conversation)
+
+        assert len(seen) >= 2, "the regenerated draft must be audited too"
+        assert seen[0] == self.FABRICATED and seen[1] == self.FABRICATED
+
+
 class TestOrderReport:
     """The deterministic reply, built from the trace rather than from model prose."""
 

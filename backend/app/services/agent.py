@@ -1364,20 +1364,37 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
             # failure (ungrounded restaurant list, discovery padding, unbacked
             # bill); see services/grounding.py for the rule it applies and for the
             # design correction that context-grounding of NAMES does not work.
-            if not grounding_corrected_once:
-                violation = grounding.audit(
-                    db, conversation, text, trace,
-                    customer_figures=grounding.figures_the_customer_wrote(db, conversation),
-                )
-                if violation is not None:
-                    grounding_corrected_once = True
-                    force_next = force_next or violation.force_tool
-                    logger.info(
-                        "conversation %s ungrounded reply (%s): %r",
+            #
+            # The audit runs on EVERY draft, not just the first. It used to be
+            # gated on grounding_corrected_once, which meant "correct once, then
+            # send whatever comes back" — a model that fabricated twice had its
+            # second fabrication delivered unaudited. One correction is still all
+            # we spend; only the terminal action changes. This also removes an
+            # asymmetry 1.2 introduced: a SALVAGED reply that fabricated twice was
+            # already suppressed, while the main loop's was sent.
+            violation = grounding.audit(
+                db, conversation, text, trace,
+                customer_figures=grounding.figures_the_customer_wrote(db, conversation),
+            )
+            if violation is not None:
+                if grounding_corrected_once:
+                    # The correction failed on its own terms. Asking again costs
+                    # another Groq call for a model that has now invented twice, so
+                    # answer from the trace instead and never send this prose.
+                    logger.error(
+                        "conversation %s: reply still ungrounded (%s) after "
+                        "correction; suppressing: %r",
                         conversation.id, violation.kind, text[:80],
                     )
-                    messages.append({"role": "system", "content": violation.nudge})
-                    continue
+                    return _order_report(trace) or FALLBACK_REPLY, trace
+                grounding_corrected_once = True
+                force_next = force_next or violation.force_tool
+                logger.info(
+                    "conversation %s ungrounded reply (%s): %r",
+                    conversation.id, violation.kind, text[:80],
+                )
+                messages.append({"role": "system", "content": violation.nudge})
+                continue
 
             # Bug 3 — discovery dishonesty. Either the model contradicted a genuine
             # zero-match by naming restaurants anyway ("no burgers" + a restaurant
