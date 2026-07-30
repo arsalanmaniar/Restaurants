@@ -370,26 +370,49 @@ def _empty_result_note(db: Session, conversation: Conversation, query: str) -> s
     one — "fall back to list_restaurants" — which was correct for none of
     them once a customer had context, and which manufactured the
     "no burgers... here are the burger restaurants" contradiction.
+
+    What every branch must carry, and what the first two used to drop: this
+    search is GLOBAL. It is not scoped to the active restaurant or to the
+    shortlist already shown. So a zero result means "nowhere", and a note that
+    frames it as "not on this menu" / "not among these" hands the model a
+    narrower truth than the one we just established. Production reply, with a
+    restaurant active and sandwich available at zero restaurants:
+
+        "Sandwich Karachi Biryani House mein nahi hai ... main aapke liye
+         doosre restaurant se search karun?"
+
+    Both halves come straight from the old note: it scoped the miss to one
+    restaurant, then told the model to offer a search that had ALREADY run and
+    returned nothing. The customer had to push back twice to hear "kisi bhi
+    restaurant mein available nahi hai".
     """
     if conversation.active_restaurant_id is not None:
         restaurant = db.get(Restaurant, conversation.active_restaurant_id)
         if restaurant is not None:
             return (
-                f"No match for '{query}'. The customer is currently browsing "
-                f"{restaurant.name} — do NOT call list_restaurants, that would reset "
-                "them. Answer from the menu already shown, say plainly if the item "
-                "isn't on it, and ask whether they want you to look elsewhere."
+                f"'{query}' is on NO open restaurant's menu. This search was GLOBAL "
+                f"— NOT limited to {restaurant.name} — so the answer is definitive. "
+                "Tell the customer that FIRST and at that scope: not available at "
+                f"ANY of our restaurants. Saying only '{restaurant.name} mein nahi "
+                "hai' is wrong here; it implies another restaurant has it. Do NOT "
+                "offer to search elsewhere — this WAS elsewhere. Keep them at "
+                f"{restaurant.name}: do NOT call list_restaurants, that would reset "
+                "them. Offer something from the menu already shown instead."
             )
 
     candidates = shown_restaurants(conversation)
     if candidates:
         names = ", ".join(entry["name"] for entry in candidates)
         return (
-            f"No match for '{query}'. You have ALREADY shown this customer these "
-            f"restaurants: {names}. Do NOT call list_restaurants — that throws away "
-            "the list they are choosing from and feels like the conversation "
-            "restarted. Re-offer those options (or say plainly that this wasn't "
-            "found among them) and ask which one they want."
+            f"'{query}' is on NO open restaurant's menu. This search was GLOBAL — "
+            "NOT limited to the restaurants you have shown — so say plainly and "
+            "FIRST that it is not available at any of our restaurants. 'Not found "
+            "among these' understates it and makes the customer ask again. Do NOT "
+            "offer to search elsewhere — this search already covered every open "
+            "restaurant. You have ALREADY shown this customer these restaurants: "
+            f"{names}. Do NOT call list_restaurants — that throws away the list "
+            "they are choosing from and feels like the conversation restarted. "
+            "Re-offer those options and ask which one they want."
         )
 
     # Genuinely nothing, anywhere, and the customer has no context to preserve.
@@ -399,13 +422,15 @@ def _empty_result_note(db: Session, conversation: Conversation, query: str) -> s
     return (
         f"Nothing on any open restaurant's menu matches '{query}' — this search "
         "already covered every restaurant, so the answer is definitive. Tell the "
-        "customer plainly and FIRST that what they asked for is not available "
-        "right now (name the DISH in their own words, not this whole query "
-        "string). Do NOT then present a numbered restaurant list under a "
-        "'restaurants serving <that dish>' heading — you just said we don't have "
-        "it, and listing restaurants under that heading contradicts you in your "
-        "own message. You MAY offer what we DO have, clearly labelled as an "
-        "alternative (see available_cuisines), then ask what they'd like instead."
+        "customer plainly and FIRST that what they asked for is not available at "
+        "ANY of our restaurants right now (name the DISH in their own words, not "
+        "this whole query string). Do NOT offer to go search elsewhere — there is "
+        "no elsewhere left to search. Do NOT then present a numbered restaurant "
+        "list under a 'restaurants serving <that dish>' heading — you just said "
+        "we don't have it, and listing restaurants under that heading contradicts "
+        "you in your own message. You MAY offer what we DO have, clearly labelled "
+        "as an alternative (see available_cuisines), then ask what they'd like "
+        "instead."
     )
 
 

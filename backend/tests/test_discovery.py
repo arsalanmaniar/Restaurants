@@ -18,6 +18,7 @@ open-only filtering, ranking wired in from Phase 2, and no leaked internal
 tags in matched_items.
 """
 
+import re
 from decimal import Decimal
 
 from sqlalchemy import delete, select, update
@@ -305,6 +306,124 @@ class TestFindRestaurantsTool:
         assert len(biryani_row["matched_items"]) <= (
             discovery_service.MAX_MATCHED_ITEMS_PER_RESTAURANT
         )
+
+
+# --------------------------------------------------------------------------- #
+# A zero-match is global, in every branch of the note
+# --------------------------------------------------------------------------- #
+
+
+# Every branch must FORBID the redundant search in so many words.
+_FORBIDS_SEARCHING_ELSEWHERE = re.compile(
+    r"do not offer to (?:go )?(?:search|look) elsewhere", re.IGNORECASE
+)
+
+# ...and no sentence may ASK the customer about going elsewhere. This is what
+# the old active-restaurant note did — "and ask whether they want you to look
+# elsewhere" — so the check is scoped to one sentence (no "." in between) to
+# keep it off the prohibition above, which never uses "ask".
+_ASKS_ABOUT_ELSEWHERE = re.compile(r"ask\b[^.]{0,60}elsewhere", re.IGNORECASE)
+
+
+class TestZeroMatchNoteIsGlobalInEveryContext:
+    """The search behind `find_restaurants` is GLOBAL — it covers every open
+    restaurant's name, cuisine, description and full menu, and is never scoped
+    to the active restaurant or to the shortlist already shown. So a zero result
+    means "nowhere", and every branch of `_empty_result_note` has to say so.
+
+    Two branches used to narrow it. Production, with Karachi Biryani House
+    active and "sandwich" available at zero restaurants:
+
+        "Sandwich Karachi Biryani House mein nahi hai ... main aapke liye
+         doosre restaurant se search karun?"
+
+    Both halves came from the note: it framed the miss as local to one
+    restaurant, then told the model to offer a search that had already run and
+    returned nothing. The customer had to push back twice before hearing "kisi
+    bhi restaurant mein available nahi hai".
+
+    The query below matches nothing on purpose — the point of each test is the
+    NOTE's framing, not whether the search works (covered above).
+    """
+
+    NOWHERE = "sushi-omakase-nowhere-xyz"
+
+    def _note(self, db, conversation):
+        result = tools.find_restaurants(db, conversation, query=self.NOWHERE)
+        assert result["found_anywhere"] is False, "fixture query must match nothing"
+        return result["note"]
+
+    def _assert_global_and_final(self, note):
+        """The two properties every branch owes the model: the answer covers ANY
+        restaurant, and searching elsewhere is never on offer.
+
+        The second is a POLARITY check, not a keyword check. Every branch now
+        mentions "elsewhere" — that is how it FORBIDS the redundant search — so a
+        bare `"elsewhere" not in note` would fail on the fix and pass on the bug.
+        So: require the prohibition, and reject any sentence that ASKS about
+        going elsewhere ("and ask whether they want you to look elsewhere").
+        """
+        assert "any of our restaurants" in note.lower()
+        assert _FORBIDS_SEARCHING_ELSEWHERE.search(note), (
+            f"note does not forbid the already-run search: {note!r}"
+        )
+        asks = _ASKS_ABOUT_ELSEWHERE.search(note)
+        assert asks is None, f"note offers a search that already ran: {asks!r}"
+
+    def test_first_contact_branch(self, db, conversation):
+        """No active restaurant, nothing shown yet — the branch that was already
+        correct. Pinned so the other two can be compared against it."""
+        self._assert_global_and_final(self._note(db, conversation))
+
+    def test_active_restaurant_branch_does_not_narrow_the_no(
+        self, db, conversation, biryani,
+    ):
+        """THE PRODUCTION BUG. With a restaurant active the note used to say
+        "say plainly if the item isn't on it, and ask whether they want you to
+        look elsewhere" — scoping a global miss to one menu and inviting a
+        redundant search. Both are gone; the continuity protection is not."""
+        conversation.active_restaurant_id = biryani.id
+        db.flush()
+
+        note = self._note(db, conversation)
+
+        self._assert_global_and_final(note)
+        # Names the active restaurant only to warn AGAINST answering at that
+        # scope — never as the scope of the "no" itself.
+        assert "wrong here" in note.lower()
+        assert biryani.name in note
+        # Continuity protection from the original note must survive.
+        assert "list_restaurants" in note
+
+    def test_shortlist_branch_does_not_narrow_the_no(self, db, conversation):
+        """Same narrowing, one step earlier: "say plainly that this wasn't found
+        among them" understates a global zero-match to the shown shortlist."""
+        conversation.context = {
+            tools.SHOWN_RESTAURANTS_KEY: [{"id": 1, "name": "Karachi Biryani House"}]
+        }
+        db.flush()
+
+        note = self._note(db, conversation)
+
+        self._assert_global_and_final(note)
+        assert "Karachi Biryani House" in note  # shortlist still preserved
+        assert "list_restaurants" in note
+
+    def test_active_restaurant_branch_still_beats_the_shortlist_branch(
+        self, db, conversation, biryani,
+    ):
+        """Branch precedence is unchanged by this fix: an active restaurant wins
+        over a shortlist, because the customer has already moved past it."""
+        conversation.active_restaurant_id = biryani.id
+        conversation.context = {
+            tools.SHOWN_RESTAURANTS_KEY: [{"id": 999, "name": "Pizza Junction"}]
+        }
+        db.flush()
+
+        note = self._note(db, conversation)
+
+        assert biryani.name in note
+        assert "Pizza Junction" not in note
 
 
 # --------------------------------------------------------------------------- #
