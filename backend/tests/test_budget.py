@@ -217,6 +217,7 @@ class TestFindRestaurantsBudgetEdgeCases:
         )
         assert result.get("error") == "invalid_budget"
 
+
     def test_bare_budget_no_query_lists_every_open_restaurant(
         self, db, conversation,
     ):
@@ -324,3 +325,55 @@ class TestFindRestaurantsBudgetEdgeCases:
         placed = tools.place_order(db, conv, payment_method="cod", contact_name="Test Customer")
         assert "error" not in placed
         assert placed["order_number"].startswith("AB-")
+
+
+class TestPartySizeArrivesAsAString:
+    """`party_size` is declared a STRING in the tool schema, for the reason
+    recorded on get_menu.restaurant_id: a type mismatch makes Groq reject the
+    entire call as malformed, and the model sends these as strings.
+
+    That moves validation from Groq to us. Before the retype, `int(party_size)`
+    would raise on anything non-numeric and lose the whole turn — the failure mode
+    the retype exists to prevent, reintroduced one layer down. These pin the
+    coercion for every shape the model has actually been seen producing.
+    """
+
+    def _party(self, db, conversation, value):
+        result = tools.find_restaurants(
+            db, conversation, query="biryani", budget="5000", party_size=value,
+        )
+        assert "error" not in result, result
+        return result["party_size"]
+
+    def test_numeric_string(self, db, conversation, biryani):
+        assert self._party(db, conversation, "4") == 4
+
+    def test_plain_int_still_works(self, db, conversation, biryani):
+        """Backward compatibility — direct callers and older traces pass ints."""
+        assert self._party(db, conversation, 4) == 4
+
+    def test_a_phrase_the_model_forgot_to_reduce(self, db, conversation, biryani):
+        """'6 logo ke liye' is what the customer types; the model is told to send
+        '6' but does not always. Take the number rather than dropping the turn."""
+        assert self._party(db, conversation, "6 logo ke liye") == 6
+        assert self._party(db, conversation, "family of 4") == 4
+
+    def test_no_number_at_all_falls_back_to_one(self, db, conversation, biryani):
+        """Must not raise. One diner is the safe assumption."""
+        assert self._party(db, conversation, "kuch log") == 1
+        assert self._party(db, conversation, "") == 1
+        assert self._party(db, conversation, None) == 1
+
+    def test_zero_and_negative_are_clamped(self, db, conversation, biryani):
+        assert self._party(db, conversation, "0") == 1
+        assert self._party(db, conversation, 0) == 1
+        assert self._party(db, conversation, -3) == 1
+
+    def test_the_old_implementation_would_have_crashed(self, db, conversation):
+        """Guard the guard: proves these inputs are genuinely hostile to the
+        int() call this replaced, so the tests above are not vacuous."""
+        import pytest as _pytest
+
+        for hostile in ("6 logo ke liye", "family of 4", "kuch log"):
+            with _pytest.raises(ValueError):
+                int(hostile)

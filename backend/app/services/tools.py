@@ -11,6 +11,7 @@ gets fed back to the model as the tool result. Rules that matter:
 """
 
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -434,12 +435,33 @@ def _empty_result_note(db: Session, conversation: Conversation, query: str) -> s
     )
 
 
+def _first_int(value: object, *, default: int) -> int:
+    """The first whole number in `value`, clamped to at least 1.
+
+    Tolerates everything the model has been seen sending for a count: a real int,
+    a numeric string ("6"), and a phrase it forgot to reduce ("6 logo ke liye",
+    "family of 4"). Returns `default` when there is no number at all, so a stray
+    word can never take down the turn.
+    """
+    if isinstance(value, bool):  # bool is an int subclass; not a party size
+        return default
+    if isinstance(value, int):
+        return max(1, value)
+    match = re.search(r"\d+", str(value or ""))
+    if not match:
+        return default
+    try:
+        return max(1, int(match.group()))
+    except ValueError:  # pragma: no cover - re guarantees digits
+        return default
+
+
 def find_restaurants(
     db: Session,
     conversation: Conversation,
     query: str = "",
     budget: float | int | str | None = None,
-    party_size: int | None = None,
+    party_size: int | str | None = None,
 ) -> dict:
     """Intent-based discovery — one tool that turns almost any customer
     phrasing ("pizza chahiye", "something spicy", "chinese", "family
@@ -480,7 +502,12 @@ def find_restaurants(
                 "message": "Budget must be a positive number.",
             }
 
-    parsed_party = max(1, int(party_size or 1))
+    # Same defensiveness as budget, and now REQUIRED rather than belt-and-braces:
+    # the schema declares party_size a string (see tool_schemas.py for why), so
+    # nothing upstream guarantees this is a number any more. The model says things
+    # like "6 logo ke liye" and "family of 4"; take the first integer it contains
+    # and ignore the rest, rather than raising and losing the whole turn.
+    parsed_party = _first_int(party_size, default=1)
 
     # Bare tool call with no query AND no budget is a no-op — refuse so the
     # model asks the customer for one or the other.

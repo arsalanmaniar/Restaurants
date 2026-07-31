@@ -91,21 +91,31 @@ TOOL_SCHEMAS = [
                             "ONLY when `budget` is also set (bare-budget query)."
                         ),
                     },
+                    # Both typed as string, not number/integer, for exactly the
+                    # reason recorded on get_menu.restaurant_id above: a type
+                    # mismatch makes Groq reject the ENTIRE call as malformed, and
+                    # the model has been observed sending these as strings —
+                    # tools.py has carried a defensive "numbers-as-strings" parse
+                    # for budget since it was written. That parse was unreachable:
+                    # the call never got past Groq to run it. Accepting a string
+                    # keeps the turn alive and lets the backend do the coercion.
                     "budget": {
-                        "type": "number",
+                        "type": "string",
                         "description": (
                             "Optional. Total budget in Pakistani Rupees the "
-                            "customer mentioned, e.g. 1500 for 'Rs. 1500 mein "
-                            "kya milega' or 'under 1500'. The estimate this "
-                            "is compared against INCLUDES delivery fee."
+                            "customer mentioned, as digits in a string — "
+                            "'1500' for 'Rs. 1500 mein kya milega' or 'under "
+                            "1500'. The estimate this is compared against "
+                            "INCLUDES delivery fee."
                         ),
                     },
                     "party_size": {
-                        "type": "integer",
+                        "type": "string",
                         "description": (
                             "Optional. Number of people if the customer "
-                            "mentioned it — '6 logo ke liye' → 6, 'family of "
-                            "4' → 4, 'mere aur meri behen' → 2. Defaults to 1."
+                            "mentioned it, as digits in a string — '6 logo ke "
+                            "liye' → '6', 'family of 4' → '4', 'mere aur meri "
+                            "behen' → '2'. Defaults to 1."
                         ),
                     },
                 },
