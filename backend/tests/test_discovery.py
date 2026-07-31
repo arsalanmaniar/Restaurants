@@ -427,6 +427,70 @@ class TestZeroMatchNoteIsGlobalInEveryContext:
 
 
 # --------------------------------------------------------------------------- #
+# The tool schema must agree with the zero-match rules
+# --------------------------------------------------------------------------- #
+
+
+class TestToolSchemaAgreesWithTheZeroMatchRules:
+    """The tool DESCRIPTION reaches the model in the same request as SYSTEM_PROMPT
+    and the tool-result note, so it is a third voice on the same question — and it
+    was saying the opposite of the other two.
+
+    `find_restaurants` carried: "If it returns zero, fall back to list_restaurants
+    rather than telling the customer 'we have nothing'." That contradicted the
+    prompt's `found_anywhere: false` rules, _empty_result_note's "do NOT call
+    list_restaurants", and the grounding nudge's "do not name any restaurant" — all
+    three of which exist because obeying that instruction is what produced the
+    "no burgers... here are the burger restaurants" contradiction in production.
+
+    Contradictory instructions in one request are also a plausible contributor to
+    the malformed tool calls seen on find_restaurants-shaped requests (conv 724).
+    """
+
+    def _description(self, name: str) -> str:
+        from app.services.tool_schemas import TOOL_SCHEMAS
+
+        return next(
+            t["function"]["description"]
+            for t in TOOL_SCHEMAS
+            if t["function"]["name"] == name
+        )
+
+    def test_find_restaurants_no_longer_recommends_the_fallback(self):
+        lowered = self._description("find_restaurants").lower()
+        assert "fall back to list_restaurants" not in lowered
+        assert "we have nothing" not in lowered
+
+    def test_find_restaurants_states_the_honest_behaviour_instead(self):
+        """Removing the wrong instruction is not enough — the description is the
+        model's closest-to-hand guidance, so it must carry the right one."""
+        lowered = self._description("find_restaurants").lower()
+        assert "found_anywhere" in lowered
+        assert "any of our restaurants" in lowered
+        assert "do not call list_restaurants" in lowered
+
+    def test_no_tool_description_pairs_a_zero_result_with_list_restaurants(self):
+        """The same contradiction must not reappear in another tool. Flags any
+        description that mentions list_restaurants near a zero/empty result
+        WITHOUT negating it."""
+        from app.services.tool_schemas import TOOL_SCHEMAS
+
+        offenders = {}
+        for schema in TOOL_SCHEMAS:
+            fn = schema["function"]
+            lowered = fn.get("description", "").lower()
+            for match in re.finditer(r"list_restaurants", lowered):
+                window = lowered[max(0, match.start() - 160):match.start()]
+                mentions_zero = any(
+                    word in window for word in ("zero", "empty", "nothing", "no match")
+                )
+                negated = "do not call" in window or "not call list" in window
+                if mentions_zero and not negated:
+                    offenders[fn["name"]] = window[-90:]
+        assert not offenders, f"tool descriptions recommend the banned fallback: {offenders}"
+
+
+# --------------------------------------------------------------------------- #
 # Menu-less restaurants are never offered
 # --------------------------------------------------------------------------- #
 
