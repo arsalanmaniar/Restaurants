@@ -293,8 +293,15 @@ class TestFakeLinkDetector:
         assert "link bhej" not in delivered.lower(), (
             f"the fake link claim must be suppressed, but customer got: {delivered!r}"
         )
-        assert "Cash on Delivery" in delivered
-        assert "naya order" in delivered.lower() or "new order" in delivered.lower()
+        # This customer has NO order — only the `conversation` fixture is in play.
+        # These two assertions used to read `"Cash on Delivery" in delivered` and
+        # require "naya order", because the single canned reply asserted a COD
+        # order existed no matter what. That is the conv 723 false claim, so the
+        # test was pinning the defect. Suppressing the lie is still required; the
+        # replacement must not substitute a second one.
+        assert delivered == agent.NO_ORDER_REPLACEMENT
+        assert "place ho chuka" not in delivered, "must not assert an order exists"
+        assert "order place karna" in delivered.lower(), "still offers a way forward"
 
     def test_real_place_order_link_passes_through(
         self, db, conversation, scripted_model
@@ -746,8 +753,93 @@ class TestSwitchToOnlineAfterCodGuard:
         agent.handle_incoming_message(db, conversation, "online payment kar sakta hoon?")
 
         assert len(sent) == 1
-        assert sent[0] == agent.FAKE_LINK_REPLACEMENT
+        assert sent[0] == agent._payment_switch_reply(cod_order)
+        assert cod_order.order_number in sent[0], "the reply names the real order"
         assert "jald hi deliver" not in sent[0], "the ignoring reply must be suppressed"
+
+
+class TestReplyNeverAssertsAnUnverifiedOrder:
+    """2b — the canned reply used to state a fact nobody had checked.
+
+    One string, "aapka order pehle hi Cash on Delivery par place ho chuka hai",
+    served BOTH guards in the elif chain. But `_claims_fake_link` fires purely on
+    the words in the model's draft — it looks for a payment-link claim and for the
+    absence of a real link, and never queries an order at all. So a customer who
+    had placed nothing could be told they had a COD order, which is what happened
+    in conversation 723 and is a path 2a's scoping does not touch.
+
+    The order is now the ground truth: named when one exists, never asserted when
+    one does not.
+    """
+
+    def test_no_order_means_no_claim_that_one_exists(self, db, conversation):
+        reply = agent._payment_switch_reply(None)
+
+        assert reply == agent.NO_ORDER_REPLACEMENT
+        assert "place ho chuka" not in reply, "must not assert an order exists"
+        assert "cash on delivery" not in reply.lower()
+
+    def test_a_real_order_is_named(self, db, cod_order, conversation):
+        reply = agent._payment_switch_reply(cod_order)
+
+        assert cod_order.order_number in reply
+        assert "Cash on Delivery" in reply
+
+    def test_fake_link_claim_with_no_order_does_not_invent_one(
+        self, db, conversation, scripted_model, monkeypatch,
+    ):
+        """THE PATH 2a CANNOT REACH. No order anywhere for this customer; the model
+        claims a link was sent. Before, the customer was told their order was
+        already COD."""
+        scripted_model(
+            [completion(message(content="Aapko payment link bhej diya gaya hai."))] * 4
+        )
+        sent = []
+        monkeypatch.setattr(agent, "send_text", lambda to, body: sent.append(body))
+
+        agent.handle_incoming_message(db, conversation, "online payment karni hai")
+
+        assert len(sent) == 1
+        assert sent[0] == agent.NO_ORDER_REPLACEMENT
+        assert "place ho chuka" not in sent[0]
+        assert "bhej diya gaya" not in sent[0], "the lie must still be suppressed"
+
+    def test_fake_link_claim_with_a_real_order_names_it(
+        self, db, cod_order, conversation, scripted_model, monkeypatch,
+    ):
+        """The original conv 690 failure still gets its correct answer — now with
+        the order number in it."""
+        scripted_model(
+            [completion(message(content="Payment link bhej diya gaya hai."))] * 4
+        )
+        sent = []
+        monkeypatch.setattr(agent, "send_text", lambda to, body: sent.append(body))
+
+        agent.handle_incoming_message(db, conversation, "online payment karni hai")
+
+        assert cod_order.order_number in sent[0]
+        assert "bhej diya gaya" not in sent[0]
+
+    def test_stale_order_gets_the_no_order_reply_not_a_stale_claim(
+        self, db, cod_order, conversation, scripted_model, monkeypatch,
+    ):
+        """2a + 2b together, which is exactly conversation 723: the only order is
+        from a previous conversation, so it is neither named nor asserted."""
+        from datetime import timedelta
+
+        conversation.created_at = agent._as_utc(cod_order.created_at) + timedelta(minutes=5)
+        db.flush()
+        scripted_model(
+            [completion(message(content="Aapko payment link bhej diya jayega."))] * 4
+        )
+        sent = []
+        monkeypatch.setattr(agent, "send_text", lambda to, body: sent.append(body))
+
+        agent.handle_incoming_message(db, conversation, "online payment karni hai")
+
+        assert sent[0] == agent.NO_ORDER_REPLACEMENT
+        assert cod_order.order_number not in sent[0]
+        assert "place ho chuka" not in sent[0]
 
 
 class TestDiscoveryHonestyGuard:

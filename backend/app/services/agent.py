@@ -83,11 +83,25 @@ FAKE_LINK_PATTERNS = (
 # What we say instead when we suppress a fake-link claim. Roman Urdu because
 # the vast majority of customers hitting this path wrote in Roman Urdu (the
 # COD → "switch to online" pattern the fallback exists to catch).
-FAKE_LINK_REPLACEMENT = (
-    "Maaf kijiye, aapka order pehle hi Cash on Delivery par place ho chuka hai — "
-    "is ke liye online payment link add nahi kiya ja sakta. Agar aap online "
-    "payment karna chahein to naya order online payment ke sath place karna hoga. "
-    "Kya main wo order taiyar karun?"
+#
+# TWO variants, because the old single one asserted a fact it had not checked.
+# It read "aapka order pehle hi Cash on Delivery par place ho chuka hai" and was
+# shared by both guards below — but `_claims_fake_link` fires purely on the words
+# in the model's reply and never looks for an order at all. A customer who had
+# placed nothing was told they had a COD order (conversation 723). The claim is
+# now made only when a real order backs it, and it names that order.
+COD_ORDER_REPLACEMENT = (
+    "Maaf kijiye, aapka order {order_number} pehle hi Cash on Delivery par place ho "
+    "chuka hai — is ke liye online payment link add nahi kiya ja sakta. Agar aap "
+    "online payment karna chahein to naya order online payment ke sath place karna "
+    "hoga. Kya main wo order taiyar karun?"
+)
+
+# No order to point at. Says only what is true in every case: no link was sent,
+# and paying online needs an order first.
+NO_ORDER_REPLACEMENT = (
+    "Maaf kijiye, abhi tak koi payment link nahi bheja gaya. Online payment ke liye "
+    "pehle order place karna hoga. Kya main aapka order taiyar karun?"
 )
 
 
@@ -171,6 +185,61 @@ def _as_utc(moment: datetime) -> datetime:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
 
 
+def _live_cod_order(db: Session, conversation: Conversation) -> Order | None:
+    """The customer's COD order from THIS conversation, placed recently and not yet
+    finished — or None if there isn't one.
+
+    Extracted so the DETECTOR and the REPLY read the same order. They used to
+    disagree: the detector checked one, and the canned reply asserted a COD order
+    existed whether or not anything had been found.
+
+    Scoping is by TIME rather than by conversation id, because `orders` has no
+    conversation_id column. get_or_create_conversation mints a fresh Conversation
+    once a customer has been idle for CONVERSATION_IDLE_TIMEOUT, so an order
+    predating this conversation's created_at belongs to an earlier one. The recency
+    bound is the belt-and-braces half, for a conversation kept alive for days by
+    messages arriving inside the idle window.
+
+    The status check reads like a liveness test but is not one: restaurants rarely
+    accept or cancel, so 12 of prod's 19 orders (8 PENDING + 2 ACCEPTED + 2 READY
+    COD) never leave the "live" set. Recency is what actually bounds this.
+    """
+    # The order must be at least as recent as BOTH bounds, so one comparison
+    # against the later of the two says it.
+    cutoff = max(
+        _as_utc(conversation.created_at),
+        datetime.now(timezone.utc) - convo.CONVERSATION_IDLE_TIMEOUT,
+    )
+    order = db.scalar(
+        select(Order)
+        .where(
+            Order.customer_id == conversation.customer_id,
+            Order.created_at >= cutoff,
+        )
+        .order_by(Order.id.desc())
+        .limit(1)
+    )
+    if order is None:
+        return None
+    if order.payment_method != PaymentMethod.COD:
+        return None
+    if order.status in (OrderStatus.CANCELLED, OrderStatus.DELIVERED):
+        return None
+    return order
+
+
+def _payment_switch_reply(order: Order | None) -> str:
+    """What the customer is told when we suppress a payment-link claim.
+
+    The order is the ground truth: with one, we name it; without one, we say only
+    what is true regardless — no link was sent. Never asserts an order exists on
+    the strength of what the model happened to write.
+    """
+    if order is None:
+        return NO_ORDER_REPLACEMENT
+    return COD_ORDER_REPLACEMENT.format(order_number=order.order_number)
+
+
 def _switch_to_online_after_cod(
     db: Session, conversation: Conversation, body: str | None, trace: list[dict]
 ) -> bool:
@@ -215,26 +284,8 @@ def _switch_to_online_after_cod(
         return False
     if _placed_an_order_this_turn(trace):
         return False
-    # The order must be at least as recent as BOTH bounds, so one comparison
-    # against the later of the two says it.
-    cutoff = max(
-        _as_utc(conversation.created_at),
-        datetime.now(timezone.utc) - convo.CONVERSATION_IDLE_TIMEOUT,
-    )
-    last_order = db.scalar(
-        select(Order)
-        .where(
-            Order.customer_id == conversation.customer_id,
-            Order.created_at >= cutoff,
-        )
-        .order_by(Order.id.desc())
-        .limit(1)
-    )
+    last_order = _live_cod_order(db, conversation)
     if last_order is None:
-        return False
-    if last_order.payment_method != PaymentMethod.COD:
-        return False
-    if last_order.status in (OrderStatus.CANCELLED, OrderStatus.DELIVERED):
         return False
     cart_lines = (conversation.cart or {}).get("items", [])
     if cart_lines and not _cart_matches_order(conversation, last_order):
@@ -949,7 +1000,7 @@ STALL_PATTERNS = (
     # reply opened "Haleem ki availability CHECK KARTA HUN." (none of the English
     # phrases match; "checking" does not appear in "check karta"), no tool was
     # forced, and the model went on to invent a restaurant list in the same
-    # message. Same blind spot as FAKE_LINK_REPLACEMENT's English-only wording.
+    # message. Same blind spot as COD_ORDER_REPLACEMENT's English-only wording.
     "check karta",
     "check karti",
     "check kar ke",
@@ -1225,7 +1276,7 @@ def _order_report(trace: list[dict]) -> str | None:
     was built for — the old "sorry, say that again" that hid a real order from a
     customer, who then re-ordered it.
 
-    Roman-Urdu-only, matching FAKE_LINK_REPLACEMENT. That is the known canned-reply
+    Roman-Urdu-only, matching COD_ORDER_REPLACEMENT. That is the known canned-reply
     language gap (followups-deferred #2), fixed for all of them together.
     """
     for step in reversed(trace):
@@ -1666,7 +1717,7 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
             conversation.id,
             reply[:200],
         )
-        reply = FAKE_LINK_REPLACEMENT
+        reply = _payment_switch_reply(_live_cod_order(db, conversation))
 
     # Bug 2 — post-COD switch IGNORED. The sibling failure to the fake link: the
     # customer asks to pay online for an already-placed COD order and the model
@@ -1678,7 +1729,7 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
             "steering to a new online order",
             conversation.id,
         )
-        reply = FAKE_LINK_REPLACEMENT
+        reply = _payment_switch_reply(_live_cod_order(db, conversation))
 
     if not reply:
         reply = FALLBACK_REPLY

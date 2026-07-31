@@ -164,7 +164,10 @@ class TestReplayRegressions:
             "online pay kar sakta hoon?",
             [_completion(_msg(content="Aapka order jald hi deliver ho jayega."))],
         )
-        assert outbound == agent.FAKE_LINK_REPLACEMENT
+        assert outbound == agent._payment_switch_reply(cod_order)
+        assert cod_order.order_number in outbound, (
+            "the reply must name the real order, not assert one generically"
+        )
         assert "jald hi deliver" not in outbound
 
     def test_3_burger_zero_match_is_not_contradicted(self, replay):
