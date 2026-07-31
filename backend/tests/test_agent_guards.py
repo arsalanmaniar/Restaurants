@@ -783,7 +783,9 @@ class TestReplyNeverAssertsAnUnverifiedOrder:
         reply = agent._payment_switch_reply(cod_order)
 
         assert cod_order.order_number in reply
-        assert "Cash on Delivery" in reply
+        # Case-insensitive: the tone rewrite lowercased this, which is how it reads
+        # mid-sentence in Roman Urdu. What matters is that COD is named at all.
+        assert "cash on delivery" in reply.lower()
 
     def test_fake_link_claim_with_no_order_does_not_invent_one(
         self, db, conversation, scripted_model, monkeypatch,
