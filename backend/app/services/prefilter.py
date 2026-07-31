@@ -23,15 +23,16 @@ from sqlalchemy.orm import Session
 
 from app.models import Conversation, MessageLog
 from app.models.enums import MessageDirection
+from app.services import canned
+from app.services.language import ROMAN_URDU
 
 
-OFFTOPIC_REDIRECT = (
-    "I'm here to help with food orders. What would you like to order today?"
-)
-RATE_LIMITED_REPLY = (
-    "We're receiving your messages faster than we can process them. "
-    "Please wait a moment before sending another."
-)
+# DEFAULT renderings only — the caller resolves the customer's language and asks
+# canned.py for the right variant. Kept as names because callers and tests refer
+# to them, and because a default has to exist for direct-tool callers with no
+# conversation history to read a language from.
+OFFTOPIC_REDIRECT = canned.text("offtopic", ROMAN_URDU)
+RATE_LIMITED_REPLY = canned.text("rate_limited", ROMAN_URDU)
 
 # 15/minute is a comfortable ceiling: a real ordering conversation is 5–10
 # turns, and even an anxious customer resending the same message a few times
@@ -104,4 +105,8 @@ def already_notified_rate_limit(db: Session, conversation: Conversation) -> bool
         .order_by(MessageLog.id.desc())
         .limit(1)
     )
-    return last_out is not None and last_out.content == RATE_LIMITED_REPLY
+    # Membership, not equality. The notice is now sent in the customer's own
+    # language (services/canned.py), so comparing against ONE hardcoded string
+    # would report "not notified" for anyone who got the other variant — and they
+    # would be told to slow down on every single message.
+    return last_out is not None and last_out.content in canned.variants("rate_limited")

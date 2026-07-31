@@ -18,6 +18,7 @@ Urdu wali tone nahi hai".
 import re
 
 from app.services import agent
+from app.services import canned
 
 
 # Call-centre English translated whole, plus the grammar slips. Each entry is
@@ -80,8 +81,9 @@ def _lint(text: str) -> list[str]:
 def _canned_replies() -> dict[str, str]:
     """The fixed strings we send customers directly, with no model in the loop."""
     return {
-        "COD_ORDER_REPLACEMENT": agent.COD_ORDER_REPLACEMENT.format(order_number="AB-1234"),
-        "NO_ORDER_REPLACEMENT": agent.NO_ORDER_REPLACEMENT,
+        f"{key}[{lang}]": canned.text(key, lang, order_number="AB-1234", extra="")
+        for key in canned.KEYS
+        for lang in (canned.ENGLISH, canned.ROMAN_URDU)
     }
 
 

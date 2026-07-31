@@ -38,6 +38,7 @@ from sqlalchemy import select
 
 from app.models import MessageDirection, Order, OrderStatus, PaymentMethod
 from app.services import agent
+from app.services import canned
 from app.services import conversations as convo
 
 
@@ -164,7 +165,7 @@ class TestReplayRegressions:
             "online pay kar sakta hoon?",
             [_completion(_msg(content="Aapka order jald hi deliver ho jayega."))],
         )
-        assert outbound == agent._payment_switch_reply(cod_order)
+        assert outbound == agent._payment_switch_reply(cod_order, canned.ROMAN_URDU)
         assert cod_order.order_number in outbound, (
             "the reply must name the real order, not assert one generically"
         )

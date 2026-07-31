@@ -14,6 +14,7 @@ import pytest
 
 from app.models import OrderStatus, PaymentMethod
 from app.services import agent
+from app.services import canned
 from app.services import conversations as convo
 from app.services import grounding
 from app.services import billing
@@ -299,7 +300,7 @@ class TestFakeLinkDetector:
         # order existed no matter what. That is the conv 723 false claim, so the
         # test was pinning the defect. Suppressing the lie is still required; the
         # replacement must not substitute a second one.
-        assert delivered == agent.NO_ORDER_REPLACEMENT
+        assert delivered == canned.text("no_order", canned.ROMAN_URDU)
         assert "place ho chuka" not in delivered, "must not assert an order exists"
         assert "order place karna" in delivered.lower(), "still offers a way forward"
 
@@ -753,7 +754,7 @@ class TestSwitchToOnlineAfterCodGuard:
         agent.handle_incoming_message(db, conversation, "online payment kar sakta hoon?")
 
         assert len(sent) == 1
-        assert sent[0] == agent._payment_switch_reply(cod_order)
+        assert sent[0] == agent._payment_switch_reply(cod_order, canned.ROMAN_URDU)
         assert cod_order.order_number in sent[0], "the reply names the real order"
         assert "jald hi deliver" not in sent[0], "the ignoring reply must be suppressed"
 
@@ -773,14 +774,14 @@ class TestReplyNeverAssertsAnUnverifiedOrder:
     """
 
     def test_no_order_means_no_claim_that_one_exists(self, db, conversation):
-        reply = agent._payment_switch_reply(None)
+        reply = agent._payment_switch_reply(None, canned.ROMAN_URDU)
 
-        assert reply == agent.NO_ORDER_REPLACEMENT
+        assert reply == canned.text("no_order", canned.ROMAN_URDU)
         assert "place ho chuka" not in reply, "must not assert an order exists"
         assert "cash on delivery" not in reply.lower()
 
     def test_a_real_order_is_named(self, db, cod_order, conversation):
-        reply = agent._payment_switch_reply(cod_order)
+        reply = agent._payment_switch_reply(cod_order, canned.ROMAN_URDU)
 
         assert cod_order.order_number in reply
         # Case-insensitive: the tone rewrite lowercased this, which is how it reads
@@ -802,7 +803,7 @@ class TestReplyNeverAssertsAnUnverifiedOrder:
         agent.handle_incoming_message(db, conversation, "online payment karni hai")
 
         assert len(sent) == 1
-        assert sent[0] == agent.NO_ORDER_REPLACEMENT
+        assert sent[0] == canned.text("no_order", canned.ROMAN_URDU)
         assert "place ho chuka" not in sent[0]
         assert "bhej diya gaya" not in sent[0], "the lie must still be suppressed"
 
@@ -839,7 +840,7 @@ class TestReplyNeverAssertsAnUnverifiedOrder:
 
         agent.handle_incoming_message(db, conversation, "online payment karni hai")
 
-        assert sent[0] == agent.NO_ORDER_REPLACEMENT
+        assert sent[0] == canned.text("no_order", canned.ROMAN_URDU)
         assert cod_order.order_number not in sent[0]
         assert "place ho chuka" not in sent[0]
 
@@ -1556,7 +1557,7 @@ class TestRepeatGroundingViolationIsSuppressed:
         monkeypatch.setattr(
             agent,
             "_order_report",
-            lambda trace: "Aapka order AB-C5475E place ho chuka hai. Total: Rs. 980.00.",
+            lambda trace, lang: "Order AB-C5475E place ho chuka hai. Total: Rs. 980.00.",
         )
         scripted_model([
             completion(message(tool_calls=[self._find_restaurants_call()])),
@@ -1599,7 +1600,8 @@ class TestOrderReport:
 
     def test_reports_order_number_and_total(self):
         report = agent._order_report(
-            [{"tool": "place_order", "result": {"order_number": "AB-123456", "total": "712.50"}}]
+            [{"tool": "place_order", "result": {"order_number": "AB-123456", "total": "712.50"}}],
+            canned.ROMAN_URDU,
         )
         assert "AB-123456" in report
         assert "712.50" in report
@@ -1612,17 +1614,18 @@ class TestOrderReport:
                 "total": "712.50",
                 "payment_link": "https://pay.example.test/abc123",
             },
-        }])
+        }], canned.ROMAN_URDU)
         assert "https://pay.example.test/abc123" in report
 
     def test_none_when_no_order_was_placed(self):
-        assert agent._order_report([{"tool": "get_menu", "result": {"items": []}}]) is None
-        assert agent._order_report([]) is None
+        assert agent._order_report([{"tool": "get_menu", "result": {"items": []}}], canned.ROMAN_URDU) is None
+        assert agent._order_report([], canned.ROMAN_URDU) is None
 
     def test_none_when_place_order_failed(self):
         """An error result carries no order_number — there is nothing to report."""
         assert agent._order_report(
-            [{"tool": "place_order", "result": {"error": "missing_address"}}]
+            [{"tool": "place_order", "result": {"error": "missing_address"}}],
+            canned.ROMAN_URDU,
         ) is None
 
     def test_reports_a_duplicate_prevented_order(self):
@@ -1630,5 +1633,5 @@ class TestOrderReport:
         report = agent._order_report([{
             "tool": "place_order",
             "result": {"duplicate_prevented": True, "order_number": "AB-999999", "total": "500.00"},
-        }])
+        }], canned.ROMAN_URDU)
         assert "AB-999999" in report

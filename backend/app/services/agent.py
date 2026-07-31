@@ -33,6 +33,7 @@ from app.models import (
     Restaurant,
     RestaurantStatus,
 )
+from app.services import canned
 from app.services import conversations as convo
 from app.services import grounding
 from app.services import language as language_service
@@ -61,10 +62,16 @@ MUTATING_TOOLS = {"add_to_cart", "place_order", "send_menu_image"}
 # request when it does. Retrying almost always works, so retry before giving up.
 MAX_MALFORMED_RETRIES = 2
 
-FALLBACK_REPLY = (
-    "Sorry, we're having a technical problem at the moment. Please try again "
-    "shortly, or reply 'help' and a member of our team will get back to you."
-)
+# The DEFAULT rendering only. Every send path resolves the customer's language
+# and calls _fallback(lang); this constant is the Roman Urdu text, which is the
+# right default because most of our customers write it — and because the old
+# English-only constant is exactly what reached a Roman Urdu customer in
+# conversation 724. See services/canned.py.
+FALLBACK_REPLY = canned.text("fallback", language_service.ROMAN_URDU)
+
+
+def _fallback(lang: str) -> str:
+    return canned.text("fallback", lang)
 
 # Substrings that indicate the model is claiming a payment link was sent or
 # is about to be. If any of these appear in a reply AND no real link exists,
@@ -80,27 +87,15 @@ FAKE_LINK_PATTERNS = (
     "link mil jaega",
 )
 
-# What we say instead when we suppress a fake-link claim. Roman Urdu because
-# the vast majority of customers hitting this path wrote in Roman Urdu (the
-# COD → "switch to online" pattern the fallback exists to catch).
+# What we say instead when we suppress a fake-link claim. TWO variants, because
+# the old single one asserted a fact it had not checked: it read "aapka order
+# pehle hi Cash on Delivery par place ho chuka hai" and was shared by both guards
+# below — but `_claims_fake_link` fires purely on the words in the model's reply
+# and never looks for an order at all, so a customer who had placed nothing was
+# told they had a COD order (conversation 723). The claim is now made only when a
+# real order backs it, and it names that order.
 #
-# TWO variants, because the old single one asserted a fact it had not checked.
-# It read "aapka order pehle hi Cash on Delivery par place ho chuka hai" and was
-# shared by both guards below — but `_claims_fake_link` fires purely on the words
-# in the model's reply and never looks for an order at all. A customer who had
-# placed nothing was told they had a COD order (conversation 723). The claim is
-# now made only when a real order backs it, and it names that order.
-COD_ORDER_REPLACEMENT = (
-    "Order {order_number} cash on delivery par place ho chuka hai, is par online "
-    "payment nahi lag sakti. Online ke liye naya order banana hoga. Bana dun?"
-)
-
-# No order to point at. Says only what is true in every case: no link was sent,
-# and paying online needs an order first.
-NO_ORDER_REPLACEMENT = (
-    "Abhi tak koi payment link nahi bheja. Online payment ke liye pehle order "
-    "place karna hoga. Order shuru karun?"
-)
+# The text itself lives in services/canned.py, in both languages.
 
 
 def _has_real_payment_link(trace: list[dict]) -> bool:
@@ -226,7 +221,7 @@ def _live_cod_order(db: Session, conversation: Conversation) -> Order | None:
     return order
 
 
-def _payment_switch_reply(order: Order | None) -> str:
+def _payment_switch_reply(order: Order | None, lang: str) -> str:
     """What the customer is told when we suppress a payment-link claim.
 
     The order is the ground truth: with one, we name it; without one, we say only
@@ -234,8 +229,8 @@ def _payment_switch_reply(order: Order | None) -> str:
     the strength of what the model happened to write.
     """
     if order is None:
-        return NO_ORDER_REPLACEMENT
-    return COD_ORDER_REPLACEMENT.format(order_number=order.order_number)
+        return canned.text("no_order", lang)
+    return canned.text("cod_order", lang, order_number=order.order_number)
 
 
 def _switch_to_online_after_cod(
@@ -1265,13 +1260,13 @@ def _leaks_tool_call(text: str | None) -> bool:
     )
 
 
-def _safe_text(text: str | None) -> str:
+def _safe_text(text: str | None, lang: str = language_service.ROMAN_URDU) -> str:
     """Every text reply generate_reply hands back goes through this — even if the
     model persists in emitting raw tool-call JSON after the forced-retry, the
     caller (test driver, batch job, webhook) never sees it. Empty strings are
     preserved so callers can distinguish 'no reply' from 'leaked reply'."""
     if text and _leaks_tool_call(text):
-        return FALLBACK_REPLY
+        return _fallback(lang)
     return text or ""
 
 
@@ -1330,7 +1325,7 @@ def _salvage_violation(
     return None
 
 
-def _order_report(trace: list[dict]) -> str | None:
+def _order_report(trace: list[dict], lang: str) -> str | None:
     """A reply built from the trace instead of from model prose: the order number
     and total of an order this turn actually placed, or None if none was.
 
@@ -1338,9 +1333,6 @@ def _order_report(trace: list[dict]) -> str | None:
     "don't send the fabrication" would recreate the exact failure the salvage path
     was built for — the old "sorry, say that again" that hid a real order from a
     customer, who then re-ordered it.
-
-    Roman-Urdu-only, matching COD_ORDER_REPLACEMENT. That is the known canned-reply
-    language gap (followups-deferred #2), fixed for all of them together.
     """
     for step in reversed(trace):
         if step.get("tool") != "place_order":
@@ -1351,18 +1343,29 @@ def _order_report(trace: list[dict]) -> str | None:
         number = result.get("order_number")
         if not number:
             continue
-        parts = [f"Aapka order {number} place ho chuka hai."]
+        extra = []
         total = result.get("total")
         if total:
-            parts.append(f"Total: Rs. {total}.")
+            extra.append(f"Total: Rs. {total}.")
         # A real link from THIS result only — never invented, so the fake-link
         # guard downstream has nothing to catch.
         link = result.get("payment_link")
         if link:
-            parts.append(f"Payment link: {link}")
-        parts.append("Koi aur cheez chahiye?")
+            extra.append(f"Payment link: {link}")
+        parts = [canned.text(
+            "order_placed", lang,
+            order_number=number,
+            extra=(" ".join(extra) + " ") if extra else "",
+        )]
         return " ".join(parts)
     return None
+
+
+def _turn_language(db: Session, conversation: Conversation) -> str:
+    """The language every canned reply in this turn should use. UNKNOWN — which
+    services/language.py returns often, by design — falls through to Roman Urdu
+    inside canned.text()."""
+    return _customer_language(db, conversation)
 
 
 def _salvage_reply(
@@ -1402,15 +1405,16 @@ def _salvage_reply(
 
     Nothing ran, so the honest answer is that nothing happened.
     """
+    lang = _turn_language(db, conversation)
     if not trace:
         logger.error(
             "conversation %s: turn failed with no tool result to report; refusing to "
             "generate an ungrounded reply",
             conversation.id,
         )
-        return FALLBACK_REPLY
+        return _fallback(lang)
 
-    text = _safe_text(_force_text_reply(client, messages))
+    text = _safe_text(_force_text_reply(client, messages), lang)
     violation = _salvage_violation(db, conversation, text, trace)
     if violation is None:
         return text
@@ -1421,7 +1425,7 @@ def _salvage_reply(
         "conversation %s: salvaged reply was ungrounded (%s); regenerating once: %r",
         conversation.id, violation.kind, text[:80],
     )
-    text = _safe_text(_force_text_reply(client, messages, extra_nudge=violation.nudge))
+    text = _safe_text(_force_text_reply(client, messages, extra_nudge=violation.nudge), lang)
     if _salvage_violation(db, conversation, text, trace) is None:
         return text
 
@@ -1432,7 +1436,7 @@ def _salvage_reply(
         "suppressing and reporting from the trace: %r",
         conversation.id, text[:80],
     )
-    return _order_report(trace) or FALLBACK_REPLY
+    return _order_report(trace, lang) or _fallback(lang)
 
 
 def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[dict]]:
@@ -1556,7 +1560,10 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
                         "correction; suppressing: %r",
                         conversation.id, violation.kind, text[:80],
                     )
-                    return _order_report(trace) or FALLBACK_REPLY, trace
+                    return (
+                        _order_report(trace, _turn_language(db, conversation))
+                        or _fallback(_turn_language(db, conversation))
+                    ), trace
                 grounding_corrected_once = True
                 force_next = force_next or violation.force_tool
                 logger.info(
@@ -1624,7 +1631,7 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
             # tool-call JSON, callers that skip handle_incoming_message (test drivers,
             # batch jobs) would receive it. _safe_text is the belt-and-braces gate that
             # makes this impossible from any code path.
-            return _safe_text(text), trace
+            return _safe_text(text, _turn_language(db, conversation)), trace
 
         # Echo the assistant's tool-call turn back verbatim; the API requires each
         # tool result to reference the call that produced it.
@@ -1727,6 +1734,8 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
     # conversation turns per day; a single MLM broadcast or a spam burst can
     # exhaust the quota and stop a real customer from ordering. See prefilter
     # module docstring for the incidents that motivated each check.
+    lang = _turn_language(db, conversation)
+
     if prefilter.is_rate_limited(db, conversation):
         if prefilter.already_notified_rate_limit(db, conversation):
             # Customer heard "please slow down" a moment ago. Log the inbound
@@ -1736,7 +1745,7 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
                 conversation.id,
             )
             return
-        _send_and_log(db, conversation, prefilter.RATE_LIMITED_REPLY)
+        _send_and_log(db, conversation, canned.text("rate_limited", lang))
         return
 
     if prefilter.is_offtopic(body):
@@ -1745,7 +1754,7 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
             conversation.id,
             body[:60],
         )
-        _send_and_log(db, conversation, prefilter.OFFTOPIC_REDIRECT)
+        _send_and_log(db, conversation, canned.text("offtopic", lang))
         return
 
     try:
@@ -1754,11 +1763,11 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
     except GroqError:
         db.rollback()
         logger.exception("LLM call failed for conversation %s", conversation.id)
-        reply, trace = FALLBACK_REPLY, []
+        reply, trace = _fallback(lang), []
     except Exception:
         db.rollback()
         logger.exception("conversation %s failed", conversation.id)
-        reply, trace = FALLBACK_REPLY, []
+        reply, trace = _fallback(lang), []
 
     # Last gate before WhatsApp. Whatever went wrong upstream, the customer must
     # never receive raw tool-call JSON.
@@ -1768,7 +1777,7 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
             conversation.id,
             reply[:120],
         )
-        reply = FALLBACK_REPLY
+        reply = _fallback(lang)
 
     # Fake-completion gate. Conv 690 row #653: after a COD order was placed,
     # the customer asked for online payment; the model said "link bhej diya
@@ -1780,7 +1789,7 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
             conversation.id,
             reply[:200],
         )
-        reply = _payment_switch_reply(_live_cod_order(db, conversation))
+        reply = _payment_switch_reply(_live_cod_order(db, conversation), lang)
 
     # Bug 2 — post-COD switch IGNORED. The sibling failure to the fake link: the
     # customer asks to pay online for an already-placed COD order and the model
@@ -1792,10 +1801,10 @@ def handle_incoming_message(db: Session, conversation: Conversation, body: str) 
             "steering to a new online order",
             conversation.id,
         )
-        reply = _payment_switch_reply(_live_cod_order(db, conversation))
+        reply = _payment_switch_reply(_live_cod_order(db, conversation), lang)
 
     if not reply:
-        reply = FALLBACK_REPLY
+        reply = _fallback(lang)
 
     try:
         send_text(conversation.customer.whatsapp_number, reply)
