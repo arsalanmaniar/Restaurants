@@ -2,6 +2,7 @@ from app.models.base import Base
 from app.models.conversation import Conversation, MessageLog
 from app.models.coupon import Coupon, CouponRedemption
 from app.models.customer import Customer, CustomerAddress
+from app.models.diagnostics import ToolCallFailure
 from app.models.enums import (
     ConversationState,
     CouponDiscountType,
@@ -37,6 +38,7 @@ __all__ = [
     "CustomerFavorite",
     "MenuCategory",
     "MenuItem",
+    "ToolCallFailure",
     "MessageDirection",
     "MessageLog",
     "Order",

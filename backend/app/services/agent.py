@@ -16,6 +16,7 @@ durable until that commit.
 import json
 import logging
 import re
+import secrets
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -35,6 +36,7 @@ from app.models import (
 )
 from app.services import canned
 from app.services import conversations as convo
+from app.services import diagnostics
 from app.services import grounding
 from app.services import language as language_service
 from app.services import prefilter
@@ -1449,6 +1451,10 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
     force_next = False
     malformed_retries = 0
 
+    # Groups this turn's malformed-call rows so the retry-recovery ratio is
+    # computable: a turn_id with no gave_up row recovered on retry.
+    turn_id = secrets.token_hex(8)
+
     forced_once = False
     total_corrected_once = False
     discovery_corrected_once = False
@@ -1475,8 +1481,13 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
             # If nothing has run yet there is nothing to salvage, and replying with
             # prose here is what produced the "let me check the menu…" dead ends:
             # the customer got a promise and no menu. Retry the tool call instead.
+            malformed_attempt = malformed_retries + 1
             if not trace and malformed_retries < MAX_MALFORMED_RETRIES:
                 malformed_retries += 1
+                diagnostics.record_tool_call_failure(
+                    turn_id=turn_id, conversation_id=conversation.id,
+                    attempt=malformed_attempt, gave_up=False, exc=exc,
+                )
                 logger.warning(
                     "conversation %s: malformed tool call, retrying (%s/%s)",
                     conversation.id,
@@ -1500,6 +1511,10 @@ def generate_reply(db: Session, conversation: Conversation) -> tuple[str, list[d
             # ran, _salvage_reply refuses to invent one.
             logger.warning(
                 "conversation %s: malformed tool call, falling back to text", conversation.id
+            )
+            diagnostics.record_tool_call_failure(
+                turn_id=turn_id, conversation_id=conversation.id,
+                attempt=malformed_attempt, gave_up=True, exc=exc,
             )
             return _salvage_reply(db, client, messages, trace, conversation), trace
 
